@@ -1,0 +1,52 @@
+name: Constellation-iOS
+options:
+  bundleIdPrefix: com.constellation
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+
+packages:
+  ConstellationCore:
+    path: ../../Core
+
+targets:
+  Constellation-iOS:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      - path: Resources
+    dependencies:
+      - package: ConstellationCore
+        product: ConstellationCore
+    info:
+      path: Resources/Info.plist
+      properties:
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        CFBundleDisplayName: Constellation
+        # Expose the app's Documents dir over Finder / Files so the
+        # SQLite store can be airdropped or backed up to Dropbox without
+        # a custom share extension.
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.constellation.ios
+        MARKETING_VERSION: "0.1"
+        CURRENT_PROJECT_VERSION: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ENABLE_USER_SCRIPT_SANDBOXING: YES
+        # Personal Team for on-device testing. Simulator stays signing-free
+        # via the per-SDK overrides so `just ios-build` works without a
+        # cert. First device run needs Xcode + -allowProvisioningUpdates.
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: JN69JDJPHH
+        "CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]": NO
+        "CODE_SIGNING_REQUIRED[sdk=iphonesimulator*]": NO
