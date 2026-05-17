@@ -50,6 +50,7 @@ struct CanvasGestureSurface: UIViewRepresentable {
         pan.maximumNumberOfTouches = 2
         pan.delegate = context.coordinator
         view.addGestureRecognizer(pan)
+        context.coordinator.pan = pan
 
         let pinch = UIPinchGestureRecognizer(
             target: context.coordinator,
@@ -112,6 +113,7 @@ struct CanvasGestureSurface: UIViewRepresentable {
         // consumes its translation and bails so we don't move the
         // canvas underneath the star at the same time.
         weak var longPress: UILongPressGestureRecognizer?
+        weak var pan: UIPanGestureRecognizer?
         private var draggingActive: Bool = false
         private var autoPanLink: CADisplayLink?
         // Most recent finger location in view coords, refreshed each
@@ -192,6 +194,12 @@ struct CanvasGestureSurface: UIViewRepresentable {
 
             case .ended, .cancelled, .failed:
                 pinchActive = false
+                // Fingers almost never lift in the same instant — one
+                // comes off first, which collapses UIPan's tracked
+                // centroid from "avg of 2 fingers" to "position of the
+                // remaining finger". Without this reset, that 20–80pt
+                // delta leaks into the next pan tick as a visible snap.
+                pan?.setTranslation(.zero, in: g.view)
 
             default:
                 break
