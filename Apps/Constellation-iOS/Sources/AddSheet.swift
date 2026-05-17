@@ -4,11 +4,12 @@ import UIKit
 
 // "+" sheet for creating a new skill or a new hobby (area). Mirrors
 // the CLI's `skill add` / `area add` but with the affordances a phone
-// wants: auto-slugified IDs, a picker for the hobby, a ColorPicker
+// wants: IDs derived from the name (no user-facing ID field — a phone
+// shouldn't make you type slugs), a picker for the hobby, a ColorPicker
 // for the tint. Position fields are intentionally absent — new skills
-// drop at the area's center and the next task (drag-to-move) handles
-// repositioning. Saving goes through Store.upsertSkill /
-// Store.upsertArea so the CRDT semantics are identical to the CLI.
+// drop at the area's center and drag-to-move handles repositioning.
+// Saving goes through Store.upsertSkill / Store.upsertArea so the CRDT
+// semantics are identical to the CLI.
 struct AddSheet: View {
     enum Mode: String, CaseIterable, Identifiable {
         case skill, area
@@ -31,16 +32,12 @@ struct AddSheet: View {
 
     // Skill form
     @State private var skillName: String = ""
-    @State private var skillId: String = ""
-    @State private var skillIdEdited: Bool = false
     @State private var skillAreaId: AreaID? = nil
     @State private var skillStatus: SkillStatus = .next
     @State private var skillFoundation: Bool = false
 
     // Area form
     @State private var areaName: String = ""
-    @State private var areaId: String = ""
-    @State private var areaIdEdited: Bool = false
     // Soft orange default — distinct from the seed palette so a
     // freshly-added area is immediately visually identifiable.
     @State private var areaTint: Color = Color(red: 0.91, green: 0.54, blue: 0.48)
@@ -109,20 +106,6 @@ struct AddSheet: View {
         } else {
             Section("Name") {
                 TextField("e.g. Hip Key", text: $skillName)
-                    .onChange(of: skillName) { _, new in
-                        if !skillIdEdited { skillId = slugify(new) }
-                    }
-            }
-            Section {
-                TextField("hip-key", text: $skillId)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .onChange(of: skillId) { _, _ in skillIdEdited = true }
-            } header: {
-                Text("ID")
-            } footer: {
-                Text("Auto-generated from name. Used in URLs and CLI.")
-                    .font(.caption2)
             }
             Section("Hobby") {
                 Picker("Hobby", selection: $skillAreaId) {
@@ -155,20 +138,6 @@ struct AddSheet: View {
         Group {
             Section("Name") {
                 TextField("e.g. Aerial Silks", text: $areaName)
-                    .onChange(of: areaName) { _, new in
-                        if !areaIdEdited { areaId = slugify(new) }
-                    }
-            }
-            Section {
-                TextField("silks", text: $areaId)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .onChange(of: areaId) { _, _ in areaIdEdited = true }
-            } header: {
-                Text("ID")
-            } footer: {
-                Text("Auto-generated from name. Used in URLs and CLI.")
-                    .font(.caption2)
             }
             Section("Tint") {
                 ColorPicker("Color", selection: $areaTint, supportsOpacity: false)
@@ -182,11 +151,10 @@ struct AddSheet: View {
         switch mode {
         case .skill:
             return !skillName.trimmed.isEmpty
-                && !skillId.isEmpty
                 && skillAreaId != nil
                 && !areas.isEmpty
         case .area:
-            return !areaName.trimmed.isEmpty && !areaId.isEmpty
+            return !areaName.trimmed.isEmpty
         }
     }
 
@@ -223,15 +191,7 @@ struct AddSheet: View {
         else {
             throw FormError("pick a hobby first")
         }
-        guard let sid = SkillID(rawValue: skillId) else {
-            throw FormError("ID can't be empty")
-        }
-        // Reject duplicate IDs explicitly so the user sees a clear
-        // error rather than silently merging via LWW (which would
-        // overwrite the existing skill's fields).
-        if try await store.skill(sid) != nil {
-            throw FormError("a skill with id '\(skillId)' already exists")
-        }
+        let sid = try await uniqueSkillId(from: skillName.trimmed)
         let skill = Skill(
             id: sid,
             areaId: areaId,
@@ -246,12 +206,7 @@ struct AddSheet: View {
     }
 
     private func saveArea() async throws -> AreaID {
-        guard let aid = AreaID(rawValue: areaId) else {
-            throw FormError("ID can't be empty")
-        }
-        if try await store.area(aid) != nil {
-            throw FormError("a hobby with id '\(areaId)' already exists")
-        }
+        let aid = try await uniqueAreaId(from: areaName.trimmed)
         let area = Area(
             id: aid,
             name: areaName.trimmed,
@@ -259,6 +214,43 @@ struct AddSheet: View {
         )
         try await store.upsertArea(area)
         return aid
+    }
+
+    // Try the base slug, then base-2, base-3, … so two skills can share
+    // a display name without the second save bouncing off LWW. Bails out
+    // after 100 attempts so a degenerate name doesn't hang the save.
+    private func uniqueSkillId(from name: String) async throws -> SkillID {
+        let base = slugify(name)
+        guard !base.isEmpty,
+              let baseId = SkillID(rawValue: base)
+        else {
+            throw FormError("name needs at least one letter or number")
+        }
+        if try await store.skill(baseId) == nil { return baseId }
+        for n in 2...100 {
+            guard let candidate = SkillID(rawValue: "\(base)-\(n)") else {
+                continue
+            }
+            if try await store.skill(candidate) == nil { return candidate }
+        }
+        throw FormError("too many skills named '\(name)' — try a different name")
+    }
+
+    private func uniqueAreaId(from name: String) async throws -> AreaID {
+        let base = slugify(name)
+        guard !base.isEmpty,
+              let baseId = AreaID(rawValue: base)
+        else {
+            throw FormError("name needs at least one letter or number")
+        }
+        if try await store.area(baseId) == nil { return baseId }
+        for n in 2...100 {
+            guard let candidate = AreaID(rawValue: "\(base)-\(n)") else {
+                continue
+            }
+            if try await store.area(candidate) == nil { return candidate }
+        }
+        throw FormError("too many hobbies named '\(name)' — try a different name")
     }
 
     private struct FormError: LocalizedError {

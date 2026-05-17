@@ -25,6 +25,10 @@ struct SkyView: View {
     let skills: [Skill]
     let areas: [Area]
     let initialFocus: InitialFocus
+    // Skills participating in the active chain-trace overlay. Empty when
+    // no trace is on. Used purely for rendering — the canvas doesn't
+    // own the chain state, it just highlights what the parent supplies.
+    let chainSkillIds: Set<SkillID>
     let store: Store
     let onMutation: () -> Void
     @Binding var selectedSkillId: SkillID?
@@ -33,6 +37,7 @@ struct SkyView: View {
         skills: [Skill],
         areas: [Area],
         initialFocus: InitialFocus = .all,
+        chainSkillIds: Set<SkillID> = [],
         store: Store,
         onMutation: @escaping () -> Void,
         selectedSkillId: Binding<SkillID?>
@@ -40,6 +45,7 @@ struct SkyView: View {
         self.skills = skills
         self.areas = areas
         self.initialFocus = initialFocus
+        self.chainSkillIds = chainSkillIds
         self.store = store
         self.onMutation = onMutation
         self._selectedSkillId = selectedSkillId
@@ -97,12 +103,29 @@ struct SkyView: View {
                         var path = Path()
                         path.move(to: from)
                         path.addLine(to: to)
-                        context.stroke(
-                            path,
-                            with: .color(Theme.Sky.star.opacity(
-                                opacityForEdge(skill: skill, prereq: prereq))),
-                            lineWidth: 0.6
-                        )
+                        let inChain = chainSkillIds.contains(skill.id)
+                            && chainSkillIds.contains(prereq.id)
+                        if inChain {
+                            // Soft halo + bright core = "glowing arc"
+                            // through the traced chain.
+                            context.stroke(
+                                path,
+                                with: .color(Theme.Sky.chain.opacity(0.22)),
+                                lineWidth: 4
+                            )
+                            context.stroke(
+                                path,
+                                with: .color(Theme.Sky.chain.opacity(0.90)),
+                                lineWidth: 1.6
+                            )
+                        } else {
+                            context.stroke(
+                                path,
+                                with: .color(Theme.Sky.star.opacity(
+                                    opacityForEdge(skill: skill, prereq: prereq))),
+                                lineWidth: 0.6
+                            )
+                        }
                     }
                     // Soft prereqs — dashed
                     for prereqId in skill.softPrereqIds {
@@ -128,7 +151,13 @@ struct SkyView: View {
                     let p = transform.apply(w.x, w.y)
                     let visual = StatusVisual.of(skill.status)
                     let tint = areaTints[skill.areaId] ?? .gray
-                    let dim = selectedSkillId != nil && selectedSkillId != skill.id
+                    let inChain = chainSkillIds.contains(skill.id)
+                    // Skills along an active chain trace stay bright
+                    // even when another star is selected — otherwise
+                    // the arc would dim out from under the user.
+                    let dim = selectedSkillId != nil
+                        && selectedSkillId != skill.id
+                        && !inChain
                     let opacity = dim ? min(0.3, visual.opacity * 0.35) : visual.opacity
 
                     // Hobby-tint halo
@@ -241,6 +270,9 @@ struct SkyView: View {
                     }
                 )
             )
+            .overlay(alignment: .bottomTrailing) {
+                resetButton(into: geo.size)
+            }
             .onAppear { fitIfNeeded(into: geo.size) }
             .onChange(of: geo.size) { _, newSize in
                 fitIfNeeded(into: newSize)
@@ -334,6 +366,39 @@ struct SkyView: View {
             width: size.width / 2 - centerX * s,
             height: size.height / 2 - centerY * s
         )
+    }
+
+    // MARK: - Reset view
+
+    // Bottom-trailing affordance to fit-all the virtual sky again after
+    // pan/zoom. Layered on top of the gesture surface (SwiftUI hit-tests
+    // overlays before their backing views, so the button consumes taps
+    // without leaking them through to UIPan/UITap below).
+    @ViewBuilder
+    private func resetButton(into size: CGSize) -> some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.25)) {
+                fitToBox(
+                    .init(x: 0, y: 0, width: world.width, height: world.height),
+                    padding: 60, into: size
+                )
+            }
+        } label: {
+            Image(systemName: "viewfinder")
+                .font(.system(size: 17, weight: .medium))
+                .foregroundStyle(.white.opacity(0.80))
+                .frame(width: 40, height: 40)
+                .background(
+                    Circle()
+                        .fill(.black.opacity(0.30))
+                        .background(Circle().fill(.ultraThinMaterial))
+                        .overlay(Circle().stroke(.white.opacity(0.10), lineWidth: 1))
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Reset view")
+        .padding(.trailing, 16)
+        .padding(.bottom, 24)
     }
 
     private func fitToBox(_ box: CGRect, padding: CGFloat, into size: CGSize) {

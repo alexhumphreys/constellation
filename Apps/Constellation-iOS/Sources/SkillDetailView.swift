@@ -18,6 +18,7 @@ struct SkillDetailView: View {
     let area: Area?
     let allSkills: [Skill]
     let allAreas: [Area]
+    let chainActive: Bool
     let store: Store
 
     private var areasById: [AreaID: Area] {
@@ -27,6 +28,7 @@ struct SkillDetailView: View {
     let onClose: () -> Void
     let onSelect: (SkillID) -> Void
     let onMutation: () -> Void
+    let onToggleChain: () -> Void
 
     @State private var sessions: [Session] = []
     @State private var notes: [Note] = []
@@ -151,6 +153,7 @@ struct SkillDetailView: View {
                         .foregroundStyle(area.color)
                 }
                 Spacer()
+                tracePill
                 Button(action: onClose) {
                     Image(systemName: "xmark.circle.fill")
                         .foregroundStyle(.white.opacity(0.4))
@@ -161,6 +164,34 @@ struct SkillDetailView: View {
                 .font(.system(size: 30, weight: .regular, design: .serif))
                 .foregroundStyle(Theme.Sky.star)
         }
+    }
+
+    // Toggle the forward-chain overlay on the canvas. Filled with the
+    // chain tint when active so the user has a clear "this is on" cue
+    // without leaving the inspector to see the canvas.
+    private var tracePill: some View {
+        Button(action: onToggleChain) {
+            Text("TRACE")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .tracking(1.2)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(
+                    Capsule().fill(
+                        chainActive ? Theme.Sky.chain.opacity(0.20) : .clear
+                    )
+                )
+                .overlay(
+                    Capsule().stroke(
+                        chainActive ? Theme.Sky.chain : .white.opacity(0.25),
+                        lineWidth: 1
+                    )
+                )
+                .foregroundStyle(
+                    chainActive ? Theme.Sky.chain : .white.opacity(0.75)
+                )
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Status picker (tapping a status both shows + sets it)
