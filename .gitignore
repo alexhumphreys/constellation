@@ -11,6 +11,12 @@ DerivedData/
 Apps/*/*.xcodeproj/
 Apps/*/*.xcworkspace/
 
+# Per-user Claude Code permission overrides — anything matching
+# *.local.json is the standard "don't commit my machine's allowlist"
+# pattern. .claude/settings.json + shared commands/agents stay tracked.
+.claude/settings.local.json
+.claude/*.local.json
+
 # Local dev databases — the store URL defaults to
 # ~/.constellation/constellation.sqlite, but folks often point
 # CONSTELLATION_STORE_PATH at a project-local file for iteration.
