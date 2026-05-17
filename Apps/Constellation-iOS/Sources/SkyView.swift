@@ -11,10 +11,33 @@ import SwiftUI
 //   - "world" = the 2400x1600 virtual sky the seed positions are in.
 //   - "screen" = the view's local coords (origin top-left).
 // Conversion: screen = world * scale + offset.
+// Where the canvas should center + zoom to on first appear. `.all`
+// fits the whole virtual sky (good on iPad's regular width). `.area`
+// fits the bounding box of one cluster + padding (used on iPhone, so
+// the canvas opens already-readable on the cluster the user actually
+// cares about instead of dropping them into a 4-galaxy soup).
+enum InitialFocus: Equatable {
+    case all
+    case area(AreaID)
+}
+
 struct SkyView: View {
     let skills: [Skill]
     let areas: [Area]
+    let initialFocus: InitialFocus
     @Binding var selectedSkillId: SkillID?
+
+    init(
+        skills: [Skill],
+        areas: [Area],
+        initialFocus: InitialFocus = .all,
+        selectedSkillId: Binding<SkillID?>
+    ) {
+        self.skills = skills
+        self.areas = areas
+        self.initialFocus = initialFocus
+        self._selectedSkillId = selectedSkillId
+    }
 
     // Committed state — applied when a gesture ends.
     @State private var offset: CGSize = .zero
@@ -197,7 +220,7 @@ struct SkyView: View {
                         }
                         .onEnded { value in
                             let next = (scale * value.magnification)
-                                .clamped(to: zoomBounds)
+                                .zoomClamped(to: zoomBounds)
                             scale = next
                             pinchDelta = 1.0
                         }
@@ -206,13 +229,18 @@ struct SkyView: View {
             .onTapGesture(coordinateSpace: .local) { location in
                 handleTap(at: location, in: geo.size, transform: transform)
             }
-            .onAppear { if !didFit { fitAll(into: geo.size); didFit = true } }
+            .onAppear { fitIfNeeded(into: geo.size) }
             .onChange(of: geo.size) { _, newSize in
-                // If the view resizes (rotation, multitasking) before a
-                // user has interacted, re-fit so the constellation
-                // stays centered. Once they've panned/zoomed we leave
-                // their viewport alone.
-                if !didFit { fitAll(into: newSize) }
+                fitIfNeeded(into: newSize)
+            }
+            // Skills load asynchronously via the parent's .task — on
+            // first appear `skills` is still empty, so we defer the
+            // initial fit until the data arrives. `initialFocus`
+            // changes don't re-fit once the user has already seen the
+            // canvas (we'd otherwise yank them back to the cluster
+            // every time they pan and the parent recomputes the focus).
+            .onChange(of: skills.count) { _, _ in
+                fitIfNeeded(into: geo.size)
             }
         }
     }
@@ -220,7 +248,7 @@ struct SkyView: View {
     // MARK: - Transform composition
 
     private var effectiveTransform: CanvasTransform {
-        let s = (scale * pinchDelta).clamped(to: zoomBounds)
+        let s = (scale * pinchDelta).zoomClamped(to: zoomBounds)
         return CanvasTransform(
             scale: s,
             offsetX: offset.width + dragDelta.width,
@@ -228,19 +256,85 @@ struct SkyView: View {
         )
     }
 
-    // MARK: - Fit-all (initial layout)
+    // MARK: - Initial focus
 
-    private func fitAll(into size: CGSize) {
+    // Idempotent fit-on-load. We can't fit during the very first
+    // onAppear because skills is still []; we can't fit after the
+    // user has interacted because that would override their pan/zoom.
+    // So: fit exactly once, the first time we see both a non-empty
+    // skill set and a real geometry.
+    private func fitIfNeeded(into size: CGSize) {
+        guard !didFit, !skills.isEmpty, size.width > 0, size.height > 0 else {
+            return
+        }
+        applyInitialFocus(into: size)
+        didFit = true
+    }
+
+    private func applyInitialFocus(into size: CGSize) {
         guard size.width > 0, size.height > 0 else { return }
-        let padding: CGFloat = 60
-        let availW = size.width - padding * 2
-        let availH = size.height - padding * 2
-        let s = min(availW / world.width, availH / world.height)
-            .clamped(to: zoomBounds)
+        switch initialFocus {
+        case .all:
+            fitToBox(.init(x: 0, y: 0, width: world.width, height: world.height),
+                     padding: 60, into: size)
+        case .area(let areaId):
+            focusOnCluster(areaId: areaId, into: size)
+        }
+    }
+
+    // Cluster focus is intentionally NOT a plain fit-to-bbox. Wide
+    // clusters like cali (1000 world-units wide × 200 tall) would
+    // fit-to-viewport at min zoom, leaving acres of vertical empty
+    // space that the *next-door* cluster leaks into — defeating the
+    // whole "land readable on one cluster" goal.
+    //
+    // Compromise: position by the area's defined center (matches the
+    // design's CLUSTER_CENTERS) and pick a zoom that *would* fit the
+    // bbox into 85% of the viewport, but never below 0.60 so we
+    // always end up demonstrably zoomed-in. User can pan/pinch from
+    // there to reach the rest of the sky.
+    private func focusOnCluster(areaId: AreaID, into size: CGSize) {
+        let areaSkills = skills.filter { $0.areaId == areaId }
+        guard !areaSkills.isEmpty else {
+            fitToBox(.init(x: 0, y: 0, width: world.width, height: world.height),
+                     padding: 60, into: size)
+            return
+        }
+        let area = areas.first { $0.id == areaId }
+        let xs = areaSkills.map(\.x)
+        let ys = areaSkills.map(\.y)
+        // Cast the world-space bbox dimensions to CGFloat — skill
+        // positions are Double in the model, viewport sizes are
+        // CGFloat in SwiftUI, and the Swift overload resolver hates
+        // mixing the two without an explicit conversion (CGFloat is a
+        // typealias for Double on 64-bit but the type system treats
+        // them as distinct for method dispatch).
+        let bboxW = CGFloat(max((xs.max() ?? 0) - (xs.min() ?? 0), 200))
+        let bboxH = CGFloat(max((ys.max() ?? 0) - (ys.min() ?? 0), 200))
+        let fitScale: CGFloat = min(
+            (size.width  * 0.85) / bboxW,
+            (size.height * 0.85) / bboxH
+        )
+        let s = Swift.max(CGFloat(0.60), fitScale).zoomClamped(to: zoomBounds)
+        let centerX = area?.centerX ?? (xs.reduce(0, +) / Double(xs.count))
+        let centerY = area?.centerY ?? (ys.reduce(0, +) / Double(ys.count))
         scale = s
         offset = CGSize(
-            width: (size.width - world.width * s) / 2,
-            height: (size.height - world.height * s) / 2
+            width: size.width / 2 - centerX * s,
+            height: size.height / 2 - centerY * s
+        )
+    }
+
+    private func fitToBox(_ box: CGRect, padding: CGFloat, into size: CGSize) {
+        let availW = size.width - padding * 2
+        let availH = size.height - padding * 2
+        let s = min(availW / box.width, availH / box.height)
+            .zoomClamped(to: zoomBounds)
+        scale = s
+        // Place box center at view center.
+        offset = CGSize(
+            width: size.width / 2 - (box.midX) * s,
+            height: size.height / 2 - (box.midY) * s
         )
     }
 
@@ -305,7 +399,14 @@ struct CanvasTransform {
 }
 
 private extension CGFloat {
-    func clamped(to range: ClosedRange<CGFloat>) -> CGFloat {
+    // Renamed from `clamped` to avoid a name collision with the
+    // package-scoped `clamped(to: ClosedRange<Double>)` Apple added
+    // somewhere in the iOS 18 SDK — that one wins overload resolution
+    // because the SDK considers `CGFloat == Double`, but its
+    // `package` visibility means it's not callable from outside its
+    // owning module and the build fails. Using a uniquely-named
+    // helper sidesteps the whole question.
+    func zoomClamped(to range: ClosedRange<CGFloat>) -> CGFloat {
         Swift.min(range.upperBound, Swift.max(range.lowerBound, self))
     }
 }
