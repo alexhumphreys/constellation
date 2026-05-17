@@ -30,6 +30,7 @@ struct SkillDetailView: View {
     @State private var draftSession: String = ""
     @State private var draftNote: String = ""
     @State private var isSaving: Bool = false
+    @State private var showPrereqPicker: Bool = false
 
     private var graph: SkillGraph { SkillGraph(allSkills) }
 
@@ -38,21 +39,10 @@ struct SkillDetailView: View {
             VStack(alignment: .leading, spacing: 18) {
                 header
                 statusPicker
-                if let n = graph.neighbours(of: skill.id) {
-                    if !n.prereqs.isEmpty {
-                        section("PREREQUISITES") {
-                            chipRow(n.prereqs)
-                        }
-                    }
-                    if !n.softPrereqs.isEmpty {
-                        section("RECOMMENDED") {
-                            chipRow(n.softPrereqs)
-                        }
-                    }
-                    if !n.unlocks.isEmpty {
-                        section("THIS UNLOCKS") {
-                            chipRow(n.unlocks)
-                        }
+                prereqsBlock(neighbours: graph.neighbours(of: skill.id))
+                if let n = graph.neighbours(of: skill.id), !n.unlocks.isEmpty {
+                    section("THIS UNLOCKS") {
+                        chipRow(n.unlocks)
                     }
                 }
                 sessionSection
@@ -63,6 +53,63 @@ struct SkillDetailView: View {
         }
         .scrollDismissesKeyboard(.interactively)
         .task(id: skill.id) { await reload() }
+        .sheet(isPresented: $showPrereqPicker) {
+            PrereqPickerSheet(
+                skill: skill,
+                allSkills: allSkills,
+                allAreas: allAreas,
+                store: store,
+                onClose: { showPrereqPicker = false },
+                onSaved: {
+                    showPrereqPicker = false
+                    onMutation()
+                }
+            )
+        }
+    }
+
+    // Header with an EDIT pill, current hard + soft chip rows, and an
+    // empty-state line when both lists are empty so the affordance is
+    // discoverable on a freshly-added skill that isn't wired up yet.
+    @ViewBuilder
+    private func prereqsBlock(neighbours n: SkillGraph.Neighbours?) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("PREREQUISITES")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .tracking(1.6)
+                    .foregroundStyle(.white.opacity(0.45))
+                Spacer()
+                Button { showPrereqPicker = true } label: {
+                    Text("EDIT")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .tracking(1.2)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4)
+                        .overlay(
+                            Capsule().stroke(.white.opacity(0.25), lineWidth: 1)
+                        )
+                        .foregroundStyle(.white.opacity(0.75))
+                }
+                .buttonStyle(.plain)
+            }
+            if let n, !n.prereqs.isEmpty {
+                chipRow(n.prereqs)
+            }
+            if let n, !n.softPrereqs.isEmpty {
+                Text("RECOMMENDED")
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .tracking(1.4)
+                    .foregroundStyle(.white.opacity(0.35))
+                    .padding(.top, 2)
+                chipRow(n.softPrereqs)
+            }
+            if let n, n.prereqs.isEmpty, n.softPrereqs.isEmpty {
+                Text("None yet — tap EDIT to wire this skill into the graph.")
+                    .font(.system(size: 13, design: .serif))
+                    .foregroundStyle(.white.opacity(0.45))
+            }
+        }
     }
 
     // MARK: - Header
