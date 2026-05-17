@@ -13,12 +13,22 @@ struct RootView: View {
     @State private var skills: [Skill] = []
     @State private var activeHobbies: Set<AreaID> = []
     @State private var selectedSkillId: SkillID? = nil
-    // Source of an active chain-trace overlay (nil = no trace). Nullified
-    // whenever the user navigates away from the trace source so the chain
-    // can't outlive the context that explains it.
+    // Target of an active backward-chain overlay (nil = no trace).
+    // Nullified whenever the user navigates away from the trace target
+    // so the chain can't outlive the context that explains it.
     @State private var chainSkillId: SkillID? = nil
     @State private var reloadToken: Int = 0
     @State private var showAddSheet: Bool = false
+    // Snapshot share sheet (export → AirDrop). URL is set after the
+    // background JSON write finishes; presentation is bound to its
+    // presence so the sheet only opens once the file actually exists.
+    @State private var exportURL: URL? = nil
+    @State private var exportError: String? = nil
+    // Inbound snapshot pending the user's "merge?" confirmation. Set by
+    // `.onOpenURL` after a successful preview-decode.
+    @State private var pendingImport: SnapshotImport.Preview? = nil
+    @State private var importError: String? = nil
+    @State private var importSourceName: String = ""
 
     @Environment(\.horizontalSizeClass) private var sizeClass
 
@@ -37,6 +47,52 @@ struct RootView: View {
         .onChange(of: selectedSkillId) { _, newValue in
             if newValue != chainSkillId { chainSkillId = nil }
         }
+        .sheet(isPresented: Binding(
+            get: { exportURL != nil },
+            set: { if !$0 { exportURL = nil } }
+        )) {
+            if let exportURL { ActivityView(items: [exportURL]) }
+        }
+        .alert("Export failed", isPresented: Binding(
+            get: { exportError != nil },
+            set: { if !$0 { exportError = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(exportError ?? "")
+        }
+        .onOpenURL { url in handleInboundFile(url) }
+        .alert(
+            "Merge snapshot from \(importSourceName)?",
+            isPresented: Binding(
+                get: { pendingImport != nil },
+                set: { if !$0 { pendingImport = nil } }
+            )
+        ) {
+            Button("Cancel", role: .cancel) { pendingImport = nil }
+            Button("Merge") {
+                if let p = pendingImport {
+                    Task { await performImport(p) }
+                }
+            }
+        } message: {
+            if let p = pendingImport {
+                Text(
+                    "\(p.areas) hobbies · \(p.skills) skills · "
+                    + "\(p.sessions) sessions · \(p.notes) notes · "
+                    + "\(p.clips) clips\n\n"
+                    + "Existing entries merge via CRDT — your local edits won't be lost."
+                )
+            }
+        }
+        .alert("Import failed", isPresented: Binding(
+            get: { importError != nil },
+            set: { if !$0 { importError = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(importError ?? "")
+        }
     }
 
     // ── iPad layout: canvas + side inspector on selection ──
@@ -47,7 +103,8 @@ struct RootView: View {
                 areas: areas,
                 active: $activeHobbies,
                 skillCount: visibleSkills.count,
-                onAdd: { showAddSheet = true }
+                onAdd: { showAddSheet = true },
+                onShare: { Task { await prepareExport() } }
             )
             .padding(.top, 12)
             .padding(.leading, 16)
@@ -86,7 +143,8 @@ struct RootView: View {
                 areas: areas,
                 active: $activeHobbies,
                 skillCount: visibleSkills.count,
-                onAdd: { showAddSheet = true }
+                onAdd: { showAddSheet = true },
+                onShare: { Task { await prepareExport() } }
             )
             .padding(.top, 12)
             .padding(.leading, 12)
@@ -133,12 +191,14 @@ struct RootView: View {
         )
     }
 
-    // Resolved BFS forward chain for the active source, materialised as
+    // Resolved BFS backward chain for the active target, materialised as
     // a Set so SkyView's per-edge / per-star check is O(1). Empty when
-    // no chain is active.
+    // no chain is active. Backward = "what's the path to here" — the
+    // learning-planning move (forward "what does this unlock" is in the
+    // graph if we ever want to toggle).
     private var chainSkillIds: Set<SkillID> {
         guard let id = chainSkillId else { return [] }
-        return Set(SkillGraph(skills).forwardChain(from: id))
+        return Set(SkillGraph(skills).backwardChain(from: id))
     }
 
     private func toggleChain(for id: SkillID) {
@@ -149,8 +209,8 @@ struct RootView: View {
         chainSkillId = id
         // Make sure every area the chain crosses is visible — otherwise
         // a hidden hobby would silently truncate the trace and the user
-        // would see a chain that doesn't actually reach where it goes.
-        let chain = SkillGraph(skills).forwardChain(from: id)
+        // would see a chain that doesn't actually reach where it comes from.
+        let chain = SkillGraph(skills).backwardChain(from: id)
         let bySkillId = Dictionary(uniqueKeysWithValues: skills.map { ($0.id, $0) })
         for sid in chain {
             if let skill = bySkillId[sid] {
@@ -211,6 +271,37 @@ struct RootView: View {
             .filter { $0.1 > 0 }
             .max { ($0.1, $1.0.rawValue) < ($1.1, $0.0.rawValue) }?
             .0
+    }
+
+    // MARK: - Snapshot sharing (AirDrop)
+
+    private func prepareExport() async {
+        do {
+            let url = try await SnapshotExport.writeForSharing(store: context.store)
+            exportURL = url
+        } catch {
+            exportError = String(describing: error)
+        }
+    }
+
+    private func handleInboundFile(_ url: URL) {
+        do {
+            let preview = try SnapshotImport.preview(from: url)
+            importSourceName = url.lastPathComponent
+            pendingImport = preview
+        } catch {
+            importError = "Couldn't read snapshot: \(error)"
+        }
+    }
+
+    private func performImport(_ preview: SnapshotImport.Preview) async {
+        do {
+            try await context.store.merge(preview.snapshot)
+            pendingImport = nil
+            reloadToken &+= 1
+        } catch {
+            importError = "Merge failed: \(error)"
+        }
     }
 
     private func reload() async {

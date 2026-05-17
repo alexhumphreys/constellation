@@ -11,6 +11,7 @@ struct HobbyFilterView: View {
     @Binding var active: Set<AreaID>
     let skillCount: Int
     let onAdd: () -> Void
+    let onShare: () -> Void
 
     @Environment(\.horizontalSizeClass) private var sizeClass
 
@@ -22,6 +23,13 @@ struct HobbyFilterView: View {
                     .tracking(2)
                     .foregroundStyle(.white.opacity(0.4))
                 Spacer(minLength: 8)
+                Button(action: onShare) {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.75))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Share snapshot via AirDrop")
                 Button(action: onAdd) {
                     Image(systemName: "plus.circle.fill")
                         .font(.system(size: 18))

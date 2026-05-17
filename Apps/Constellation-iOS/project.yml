@@ -32,6 +32,26 @@ targets:
         # a custom share extension.
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
+        # Declare a custom file type for snapshot exports. AirDrop and
+        # the iOS share sheet need this so a `.constellation` file lands
+        # back in our app on the receiving device rather than being
+        # passed to a generic JSON viewer.
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: com.constellation.snapshot
+            UTTypeDescription: Constellation Snapshot
+            UTTypeConformsTo:
+              - public.json
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - constellation
+              public.mime-type:
+                - application/json
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: Constellation Snapshot
+            CFBundleTypeRole: Editor
+            LSHandlerRank: Owner
+            LSItemContentTypes:
+              - com.constellation.snapshot
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.constellation.ios

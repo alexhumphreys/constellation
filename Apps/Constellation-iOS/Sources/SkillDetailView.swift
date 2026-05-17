@@ -166,9 +166,11 @@ struct SkillDetailView: View {
         }
     }
 
-    // Toggle the forward-chain overlay on the canvas. Filled with the
-    // chain tint when active so the user has a clear "this is on" cue
-    // without leaving the inspector to see the canvas.
+    // Toggle the backward-chain overlay on the canvas — lights up the
+    // path of prereqs leading to this skill ("what do I need to learn
+    // to get here"). Filled with the chain tint when active so the user
+    // has a clear "this is on" cue without leaving the inspector to see
+    // the canvas.
     private var tracePill: some View {
         Button(action: onToggleChain) {
             Text("TRACE")
