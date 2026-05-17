@@ -1,0 +1,19 @@
+.DS_Store
+*.swp
+.build/
+Core/.build/
+.swiftpm/
+Core/.swiftpm/
+Package.resolved
+xcuserdata/
+*.xcuserstate
+DerivedData/
+Apps/*/*.xcodeproj/
+Apps/*/*.xcworkspace/
+
+# Local dev databases — the store URL defaults to
+# ~/.constellation/constellation.sqlite, but folks often point
+# CONSTELLATION_STORE_PATH at a project-local file for iteration.
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
