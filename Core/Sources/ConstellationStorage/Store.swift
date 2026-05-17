@@ -301,7 +301,7 @@ public actor Store {
         let existing = try writer.read { db in
             try ClipRow.fetchOne(db, key: clip.id.rawValue)?.toModel()
         }
-        let merged = existing.map { CRDT.mergeAppendOnly($0, clip) } ?? clip
+        let merged = existing.map { CRDT.mergeMutableAppendOnly($0, clip) } ?? clip
         try writer.write { db in
             try ClipRow(merged).save(db)
             try insertEvent(
@@ -314,8 +314,10 @@ public actor Store {
                     fields: [
                         "skill_id": .string(clip.skillId.rawValue),
                         "clip_id": .string(clip.id.rawValue),
-                        "source": .string(clip.source),
+                        "platform": .string(clip.platform),
+                        "has_handle": .bool(clip.handle != nil),
                         "has_url": .bool(clip.url != nil),
+                        "was_existing": .bool(existing != nil),
                     ]
                 )
             )

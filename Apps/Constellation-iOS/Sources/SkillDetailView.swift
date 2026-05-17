@@ -1,15 +1,18 @@
 import ConstellationCore
 import SwiftUI
+import UIKit
 
 // The drawer / sheet shown when a star is tapped. Mirrors the design's
 // SkillDrawer:
 //   header (area chip + name + status pill + Save/Trace buttons)
 //   prereqs / unlocks chip rows
+//   clips list
 //   sessions list
 //   notes list
 // v1 supports: changing the skill's status, jumping to a neighbour
-// (which keeps the drawer open on the new skill), adding a session
-// or note inline. Deferred: clips UI, chain tracing.
+// (which keeps the drawer open on the new skill), adding a session,
+// note, or URL-based clip inline. Deferred: chain tracing, camera-roll
+// picker, in-app playback, edit/delete (matches sessions + notes).
 struct SkillDetailView: View {
     let skill: Skill
     let area: Area?
@@ -27,10 +30,16 @@ struct SkillDetailView: View {
 
     @State private var sessions: [Session] = []
     @State private var notes: [Note] = []
+    @State private var clips: [Clip] = []
     @State private var draftSession: String = ""
     @State private var draftNote: String = ""
     @State private var isSaving: Bool = false
     @State private var showPrereqPicker: Bool = false
+    // Clip-sheet state. `editingClip = nil && showClipSheet = true`
+    // means "add"; `editingClip = <clip>` means "edit that clip". We
+    // bind `showClipSheet` to the sheet so dismissal works for both.
+    @State private var showClipSheet: Bool = false
+    @State private var editingClip: Clip? = nil
 
     private var graph: SkillGraph { SkillGraph(allSkills) }
 
@@ -45,6 +54,7 @@ struct SkillDetailView: View {
                         chipRow(n.unlocks)
                     }
                 }
+                clipsSection
                 sessionSection
                 notesSection
                 Color.clear.frame(height: 40)  // bottom safe area
@@ -62,6 +72,19 @@ struct SkillDetailView: View {
                 onClose: { showPrereqPicker = false },
                 onSaved: {
                     showPrereqPicker = false
+                    onMutation()
+                }
+            )
+        }
+        .sheet(isPresented: $showClipSheet, onDismiss: { editingClip = nil }) {
+            AddClipSheet(
+                skill: skill,
+                store: store,
+                existing: editingClip,
+                onClose: { showClipSheet = false },
+                onSaved: {
+                    showClipSheet = false
+                    Task { await reload() }
                     onMutation()
                 }
             )
@@ -260,6 +283,122 @@ struct SkillDetailView: View {
         }
     }
 
+    // MARK: - Clips
+
+    // Section header mirrors the PREREQUISITES block — count chip on the
+    // left, ADD pill on the right. Empty state is a single hint line so
+    // the affordance is discoverable on a freshly-added skill.
+    private var clipsSection: some View {
+        let area = self.area
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("CLIPS · \(clips.count)")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .tracking(1.6)
+                    .foregroundStyle(.white.opacity(0.45))
+                Spacer()
+                Button {
+                    editingClip = nil
+                    showClipSheet = true
+                } label: {
+                    Text("ADD")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .tracking(1.2)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4)
+                        .overlay(
+                            Capsule().stroke(.white.opacity(0.25), lineWidth: 1)
+                        )
+                        .foregroundStyle(.white.opacity(0.75))
+                }
+                .buttonStyle(.plain)
+            }
+            if clips.isEmpty {
+                Text("None yet — tap ADD to save an IG reel, YouTube link, or article. Long-press a saved clip to edit.")
+                    .font(.system(size: 13, design: .serif))
+                    .foregroundStyle(.white.opacity(0.45))
+            } else {
+                ForEach(clips, id: \.id) { clip in
+                    clipRow(clip, tint: area?.color ?? .gray)
+                }
+            }
+        }
+    }
+
+    private func clipRow(_ clip: Clip, tint: Color) -> some View {
+        // Tap behaviour: open the URL in Safari if present; for
+        // notes-only clips (no URL) tap → edit so they're not a
+        // dead row. Long-press → context menu with Edit for both.
+        Button {
+            if let url = clip.url {
+                UIApplication.shared.open(url)
+            } else {
+                openEditor(for: clip)
+            }
+        } label: {
+            HStack(alignment: .top, spacing: 0) {
+                Rectangle()
+                    .fill(tint)
+                    .frame(width: 2)
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        Text(clip.platform.uppercased())
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .tracking(1.2)
+                            .foregroundStyle(tint)
+                        if let handle = clip.handle {
+                            Text("· \(handle)")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(.white.opacity(0.65))
+                        }
+                        if let duration = clip.duration {
+                            Text("· \(duration)")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(.white.opacity(0.45))
+                        }
+                        Spacer()
+                        if clip.url != nil {
+                            Image(systemName: "arrow.up.right.square")
+                                .imageScale(.small)
+                                .foregroundStyle(.white.opacity(0.4))
+                        }
+                    }
+                    Text(clip.title)
+                        .font(.system(size: 15, design: .serif))
+                        .foregroundStyle(.white.opacity(0.88))
+                        .multilineTextAlignment(.leading)
+                    if let note = clip.note {
+                        Text(note)
+                            .font(.system(size: 13, design: .serif))
+                            .foregroundStyle(.white.opacity(0.6))
+                            .multilineTextAlignment(.leading)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+            }
+            .background(.white.opacity(0.02))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button {
+                openEditor(for: clip)
+            } label: {
+                Label("Edit clip", systemImage: "pencil")
+            }
+        }
+    }
+
+    // Edit affordance shared between long-press menu and the
+    // tap-on-noteless-clip path. Order of operations matters: set
+    // `editingClip` before flipping `showClipSheet` so the sheet's
+    // init reads the right existing clip.
+    private func openEditor(for clip: Clip) {
+        editingClip = clip
+        showClipSheet = true
+    }
+
     // MARK: - Notes
 
     private var notesSection: some View {
@@ -303,9 +442,11 @@ struct SkillDetailView: View {
         do {
             let s = try await store.sessions(for: skill.id)
             let n = try await store.notes(for: skill.id)
+            let c = try await store.clips(for: skill.id)
             await MainActor.run {
                 self.sessions = s
                 self.notes = n
+                self.clips = c
             }
         } catch {
             print("detail reload failed: \(error)")

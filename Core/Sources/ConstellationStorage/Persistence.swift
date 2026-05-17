@@ -210,23 +210,27 @@ struct ClipRow: Codable, FetchableRecord, PersistableRecord {
 
     var id: String
     var skillId: String
-    var source: String
+    var platform: String
+    var handle: String?
     var title: String
     var url: String?
     var duration: String?
     var note: String?
     var addedAt: Date
+    var updatedAt: Date
     var tombstonedAt: Date?
 
     init(_ clip: Clip) {
         self.id = clip.id.rawValue
         self.skillId = clip.skillId.rawValue
-        self.source = clip.source
+        self.platform = clip.platform
+        self.handle = clip.handle
         self.title = clip.title
         self.url = clip.url?.absoluteString
         self.duration = clip.duration
         self.note = clip.note
         self.addedAt = clip.addedAt
+        self.updatedAt = clip.updatedAt
         self.tombstonedAt = clip.tombstonedAt
     }
 
@@ -234,12 +238,14 @@ struct ClipRow: Codable, FetchableRecord, PersistableRecord {
         Clip(
             id: ClipID(id),
             skillId: SkillID(skillId),
-            source: source,
+            platform: platform,
+            handle: handle,
             title: title,
             url: url.flatMap(URL.init(string:)),
             duration: duration,
             note: note,
             addedAt: addedAt,
+            updatedAt: updatedAt,
             tombstonedAt: tombstonedAt
         )
     }

@@ -16,6 +16,66 @@ enum Migrations {
             try createWideEventsTable(db)
         }
 
+        // The freeform `source` field was confusing on iOS — auto-derived
+        // platform + optional @handle reads cleaner and pairs with future
+        // IG/YT API integration (handle/embed pulled from URL). Existing
+        // v0.1 dbs at this version contain only test data, so we keep the
+        // migration simple: copy `source` into `platform` verbatim, leave
+        // `handle` null, then drop the old column.
+        m.registerMigration("v2_split_clip_source") { db in
+            try db.alter(table: "clips") { t in
+                t.add(column: "platform", .text).notNull().defaults(to: "Other")
+                t.add(column: "handle", .text)
+            }
+            try db.execute(sql: "UPDATE clips SET platform = source")
+            try db.alter(table: "clips") { t in
+                t.drop(column: "source")
+            }
+        }
+
+        // Promote Clip from strict-append-only to LWW-with-tombstones so
+        // edits on a saved clip (most commonly: add a note after the
+        // fact, fix a wrong URL) can actually propagate through the CRDT
+        // merge. Backfill `updated_at = added_at` so existing rows have a
+        // sane clock — the next user-driven edit bumps it forward.
+        m.registerMigration("v3_clip_updated_at") { db in
+            try db.alter(table: "clips") { t in
+                t.add(column: "updated_at", .datetime)
+            }
+            try db.execute(sql: "UPDATE clips SET updated_at = added_at")
+            // Tighten the schema so future inserts can't skip the clock.
+            // SQLite can't add NOT NULL post-hoc, so we mirror the rest
+            // of the codebase's pattern (a defensive `coalesce` in the
+            // model layer would also work; this is cleaner).
+            try db.execute(sql: """
+                CREATE TABLE clips_new (
+                    id TEXT PRIMARY KEY,
+                    skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE RESTRICT,
+                    platform TEXT NOT NULL DEFAULT 'Other',
+                    handle TEXT,
+                    title TEXT NOT NULL,
+                    url TEXT,
+                    duration TEXT,
+                    note TEXT,
+                    added_at DATETIME NOT NULL,
+                    updated_at DATETIME NOT NULL,
+                    tombstoned_at DATETIME
+                )
+            """)
+            try db.execute(sql: """
+                INSERT INTO clips_new SELECT
+                    id, skill_id, platform, handle, title, url, duration,
+                    note, added_at, updated_at, tombstoned_at
+                FROM clips
+            """)
+            try db.execute(sql: "DROP TABLE clips")
+            try db.execute(sql: "ALTER TABLE clips_new RENAME TO clips")
+            try db.create(
+                index: "idx_clips_skill_added", on: "clips",
+                columns: ["skill_id", "added_at"]
+            )
+        }
+
         return m
     }
 

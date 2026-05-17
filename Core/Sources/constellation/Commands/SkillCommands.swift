@@ -154,7 +154,8 @@ struct SkillCommands: AsyncParsableCommand {
             if !clips.isEmpty {
                 print("  clips (\(clips.count)):")
                 for c in clips.prefix(5) {
-                    print("    [\(c.source)]  \(c.title)")
+                    let byline = c.handle.map { " · \($0)" } ?? ""
+                    print("    [\(c.platform)\(byline)]  \(c.title)")
                 }
             }
         }

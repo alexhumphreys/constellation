@@ -16,8 +16,11 @@ struct ClipCommands: AsyncParsableCommand {
 
         @Argument var skill: String
 
-        @Option(name: .long, help: "Source label, e.g. 'IG · @silks_tutor'.")
-        var source: String
+        @Option(name: .long, help: "Coarse platform bucket: 'Instagram', 'YouTube', 'Note', etc.")
+        var platform: String
+
+        @Option(name: .long, help: "Optional @-style creator handle, e.g. '@silks_tutor'.")
+        var handle: String?
 
         @Option(name: .long) var title: String
         @Option(name: .long) var url: String?
@@ -28,7 +31,8 @@ struct ClipCommands: AsyncParsableCommand {
             let ctx = try await AppContext.standard()
             let clip = Clip(
                 skillId: SkillID(skill),
-                source: source,
+                platform: platform,
+                handle: handle,
                 title: title,
                 url: url.flatMap(URL.init(string:)),
                 duration: duration,
@@ -55,7 +59,8 @@ struct ClipCommands: AsyncParsableCommand {
             }
             for clip in clips {
                 let dur = clip.duration.map { " (\($0))" } ?? ""
-                print("[\(clip.source)] \(clip.title)\(dur)")
+                let byline = clip.handle.map { " · \($0)" } ?? ""
+                print("[\(clip.platform)\(byline)] \(clip.title)\(dur)")
                 if let url = clip.url { print("    \(url)") }
                 if let note = clip.note { print("    note: \(note)") }
             }
