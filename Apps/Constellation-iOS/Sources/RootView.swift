@@ -112,6 +112,8 @@ struct RootView: View {
             skills: visibleSkills,
             areas: areas,
             initialFocus: initialFocus,
+            store: context.store,
+            onMutation: { reloadToken &+= 1 },
             selectedSkillId: $selectedSkillId
         )
     }

@@ -1,8 +1,8 @@
 import SwiftUI
 import UIKit
 
-// Transparent UIKit overlay that owns the pan / pinch / tap recognizers
-// for the constellation canvas.
+// Transparent UIKit overlay that owns the pan / pinch / tap / long-press
+// recognizers for the constellation canvas.
 //
 // Why UIKit instead of SwiftUI's MagnifyGesture + DragGesture:
 //   1. SwiftUI's DragGesture is single-finger; MagnifyGesture is two-
@@ -24,6 +24,16 @@ struct CanvasGestureSurface: UIViewRepresentable {
     @Binding var scale: CGFloat
     let zoomBounds: ClosedRange<CGFloat>
     let onTap: (CGPoint) -> Void
+    // Long-press drag callbacks. began returns true if the hit-test
+    // matched a draggable target — that's the signal that we should
+    // suppress pan for the rest of this gesture. Each tick during
+    // .changed/.autoPan passes the *current finger location in view
+    // coords*; the host translates that to world coords. The host
+    // also gets to override the view's offset (passed via the binding)
+    // each tick, so edge auto-pan composes cleanly.
+    let onDragBegan: (CGPoint) -> Bool
+    let onDragChanged: (CGPoint) -> Void
+    let onDragEnded: () -> Void
 
     func makeUIView(context: Context) -> UIView {
         let view = TouchView()
@@ -57,6 +67,21 @@ struct CanvasGestureSurface: UIViewRepresentable {
         // fire when the user is dragging.
         view.addGestureRecognizer(tap)
 
+        let longPress = UILongPressGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handleLongPress(_:))
+        )
+        // 0.4s feels snappier than the 0.5s default without competing
+        // with the "hold to inspect" muscle memory iOS users have. The
+        // finger has to stay roughly still for those 0.4s, which is
+        // what gives us free non-interference with pan (pan needs
+        // movement, long-press needs stillness — they don't both fire
+        // for the same touch sequence).
+        longPress.minimumPressDuration = 0.4
+        longPress.delegate = context.coordinator
+        view.addGestureRecognizer(longPress)
+        context.coordinator.longPress = longPress
+
         return view
     }
 
@@ -83,6 +108,18 @@ struct CanvasGestureSurface: UIViewRepresentable {
         private var pinchAnchorWorld: CGPoint = .zero
         private var pinchActive: Bool = false
 
+        // Drag state. While `draggingActive` is true, the pan handler
+        // consumes its translation and bails so we don't move the
+        // canvas underneath the star at the same time.
+        weak var longPress: UILongPressGestureRecognizer?
+        private var draggingActive: Bool = false
+        private var autoPanLink: CADisplayLink?
+        // Most recent finger location in view coords, refreshed each
+        // long-press tick and read by the display-link callback so
+        // edge auto-pan doesn't need its own gesture handle.
+        private var lastDragLocation: CGPoint = .zero
+        private weak var hostView: UIView?
+
         init(parent: CanvasGestureSurface) {
             self.parent = parent
         }
@@ -106,7 +143,11 @@ struct CanvasGestureSurface: UIViewRepresentable {
             // zero) so when the pinch ends the pan picks up cleanly
             // from the current finger position instead of snapping
             // back by the accumulated translation.
-            if pinchActive {
+            //
+            // Same story while a star is being dragged: the long-press
+            // handler is what's mutating world state, and we don't
+            // want the canvas to slide under it.
+            if pinchActive || draggingActive {
                 g.setTranslation(.zero, in: g.view)
                 return
             }
@@ -162,6 +203,94 @@ struct CanvasGestureSurface: UIViewRepresentable {
         @objc func handleTap(_ g: UITapGestureRecognizer) {
             let loc = g.location(in: g.view)
             parent.onTap(loc)
+        }
+
+        // MARK: long-press drag
+
+        @objc func handleLongPress(_ g: UILongPressGestureRecognizer) {
+            let loc = g.location(in: g.view)
+            switch g.state {
+            case .began:
+                // Ask the host to hit-test. If nothing was under the
+                // finger we cancel the recognizer so subsequent ticks
+                // don't keep firing for an empty drag, and so the user
+                // can long-press background → still pan/zoom normally.
+                if parent.onDragBegan(loc) {
+                    draggingActive = true
+                    lastDragLocation = loc
+                    hostView = g.view
+                    startAutoPanIfNeeded()
+                } else {
+                    g.isEnabled = false
+                    g.isEnabled = true
+                }
+
+            case .changed:
+                guard draggingActive else { return }
+                lastDragLocation = loc
+                parent.onDragChanged(loc)
+
+            case .ended, .cancelled, .failed:
+                guard draggingActive else { return }
+                draggingActive = false
+                stopAutoPan()
+                parent.onDragEnded()
+
+            default:
+                break
+            }
+        }
+
+        // MARK: edge auto-pan
+
+        private func startAutoPanIfNeeded() {
+            guard autoPanLink == nil else { return }
+            let link = CADisplayLink(
+                target: self, selector: #selector(autoPanTick)
+            )
+            // .common so it keeps firing while UIKit is tracking
+            // touches (default mode would pause during tracking).
+            link.add(to: .main, forMode: .common)
+            autoPanLink = link
+        }
+
+        private func stopAutoPan() {
+            autoPanLink?.invalidate()
+            autoPanLink = nil
+        }
+
+        @objc private func autoPanTick() {
+            guard draggingActive, let view = hostView else { return }
+            let bounds = view.bounds
+            // Inset = how close to the edge the finger has to be
+            // before we start scrolling. Speed ramps from 0 at the
+            // inset boundary to `maxSpeed` at the very edge so the
+            // pan accelerates the closer you get.
+            let inset: CGFloat = 60
+            let maxSpeed: CGFloat = 12  // pts per frame at the edge
+            var dx: CGFloat = 0
+            var dy: CGFloat = 0
+            let p = lastDragLocation
+            if p.x < inset {
+                dx = (inset - p.x) / inset * maxSpeed
+            } else if p.x > bounds.width - inset {
+                dx = -((p.x - (bounds.width - inset)) / inset * maxSpeed)
+            }
+            if p.y < inset {
+                dy = (inset - p.y) / inset * maxSpeed
+            } else if p.y > bounds.height - inset {
+                dy = -((p.y - (bounds.height - inset)) / inset * maxSpeed)
+            }
+            guard dx != 0 || dy != 0 else { return }
+            // Move the canvas in the direction we're pushing — same
+            // sign as a finger drag in that direction.
+            parent.offset.width  += dx
+            parent.offset.height += dy
+            // The finger hasn't moved, but the canvas under it has —
+            // so from the star's perspective the world point under
+            // the finger has shifted. Re-emit a changed event so the
+            // host re-solves the star's world position and it tracks.
+            parent.onDragChanged(p)
         }
 
         private func clamp(

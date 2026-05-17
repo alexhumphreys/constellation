@@ -25,17 +25,23 @@ struct SkyView: View {
     let skills: [Skill]
     let areas: [Area]
     let initialFocus: InitialFocus
+    let store: Store
+    let onMutation: () -> Void
     @Binding var selectedSkillId: SkillID?
 
     init(
         skills: [Skill],
         areas: [Area],
         initialFocus: InitialFocus = .all,
+        store: Store,
+        onMutation: @escaping () -> Void,
         selectedSkillId: Binding<SkillID?>
     ) {
         self.skills = skills
         self.areas = areas
         self.initialFocus = initialFocus
+        self.store = store
+        self.onMutation = onMutation
         self._selectedSkillId = selectedSkillId
     }
 
@@ -47,6 +53,15 @@ struct SkyView: View {
     @State private var scale: CGFloat = 0.5
 
     @State private var didFit: Bool = false
+
+    // Drag-to-move overlay state. While the user is long-press dragging
+    // a star we render at this overridden world position so the canvas
+    // updates at 60fps without round-tripping through the Store. On
+    // drag-end we upsert the skill, trigger a parent reload, and clear
+    // the override on the next tick — by then the persisted x/y is in
+    // `skills` so the star doesn't jump.
+    @State private var draggingSkillId: SkillID? = nil
+    @State private var dragOverride: CGPoint? = nil
 
     private let world = CGSize(width: 2400, height: 1600)
     private let zoomBounds: ClosedRange<CGFloat> = 0.30...3.00
@@ -66,14 +81,19 @@ struct SkyView: View {
                     with: .color(Theme.Sky.bg1)
                 )
 
-                // Prereq edges first so stars sit on top.
+                // Prereq edges first so stars sit on top. While
+                // a star is being dragged, both endpoints of any
+                // edge it touches need to use the override world
+                // position so the wires follow the star.
                 for skill in skills {
-                    let to = transform.apply(skill.x, skill.y)
+                    let toWorld = worldPosition(of: skill)
+                    let to = transform.apply(toWorld.x, toWorld.y)
                     for prereqId in skill.prereqIds {
                         guard let prereq = visibleSkillsById[prereqId] else {
                             continue
                         }
-                        let from = transform.apply(prereq.x, prereq.y)
+                        let fromWorld = worldPosition(of: prereq)
+                        let from = transform.apply(fromWorld.x, fromWorld.y)
                         var path = Path()
                         path.move(to: from)
                         path.addLine(to: to)
@@ -89,7 +109,8 @@ struct SkyView: View {
                         guard let prereq = visibleSkillsById[prereqId] else {
                             continue
                         }
-                        let from = transform.apply(prereq.x, prereq.y)
+                        let fromWorld = worldPosition(of: prereq)
+                        let from = transform.apply(fromWorld.x, fromWorld.y)
                         var path = Path()
                         path.move(to: from)
                         path.addLine(to: to)
@@ -103,7 +124,8 @@ struct SkyView: View {
 
                 // Stars on top.
                 for skill in skills {
-                    let p = transform.apply(skill.x, skill.y)
+                    let w = worldPosition(of: skill)
+                    let p = transform.apply(w.x, w.y)
                     let visual = StatusVisual.of(skill.status)
                     let tint = areaTints[skill.areaId] ?? .gray
                     let dim = selectedSkillId != nil && selectedSkillId != skill.id
@@ -187,7 +209,8 @@ struct SkyView: View {
                 // hide everything else when zoomed out so the canvas
                 // doesn't read as soup.
                 for skill in skills where shouldLabel(skill, scale: transform.scale) {
-                    let p = transform.apply(skill.x, skill.y)
+                    let w = worldPosition(of: skill)
+                    let p = transform.apply(w.x, w.y)
                     let visual = StatusVisual.of(skill.status)
                     let text = Text(skill.name)
                         .font(.system(size: 11, weight: .regular, design: .serif))
@@ -206,6 +229,15 @@ struct SkyView: View {
                     zoomBounds: zoomBounds,
                     onTap: { location in
                         handleTap(at: location, in: geo.size, transform: transform)
+                    },
+                    onDragBegan: { location in
+                        beginDrag(at: location, transform: transform)
+                    },
+                    onDragChanged: { location in
+                        updateDrag(at: location)
+                    },
+                    onDragEnded: {
+                        endDrag()
                     }
                 )
             )
@@ -322,13 +354,26 @@ struct SkyView: View {
     private func handleTap(
         at location: CGPoint, in size: CGSize, transform: CanvasTransform
     ) {
-        // Linear scan over skills — N is tiny (~50). Pick the nearest
-        // star within a finger-sized screen-space radius regardless of
-        // zoom; that way zoomed-out tiny stars are still hittable.
+        let bestId = hitTest(at: location, transform: transform)
+        // Tap on background clears selection; tap on a star toggles.
+        if let bestId {
+            selectedSkillId = (selectedSkillId == bestId) ? nil : bestId
+        } else {
+            selectedSkillId = nil
+        }
+    }
+
+    // Linear scan over skills — N is tiny (~50). Pick the nearest star
+    // within a finger-sized screen-space radius regardless of zoom; that
+    // way zoomed-out tiny stars are still hittable.
+    private func hitTest(
+        at location: CGPoint, transform: CanvasTransform
+    ) -> SkillID? {
         var bestId: SkillID? = nil
         var bestDist: CGFloat = 40  // 40pt = comfortable finger target
         for skill in skills {
-            let p = transform.apply(skill.x, skill.y)
+            let w = worldPosition(of: skill)
+            let p = transform.apply(w.x, w.y)
             let dx = p.x - location.x, dy = p.y - location.y
             let dist = (dx * dx + dy * dy).squareRoot()
             if dist < bestDist {
@@ -336,12 +381,84 @@ struct SkyView: View {
                 bestId = skill.id
             }
         }
-        // Tap on background clears selection; tap on a star toggles.
-        if let bestId {
-            selectedSkillId = (selectedSkillId == bestId) ? nil : bestId
-        } else {
-            selectedSkillId = nil
+        return bestId
+    }
+
+    // MARK: - Drag-to-move
+
+    // Render-time position: returns the live drag override if this
+    // is the star being dragged, otherwise its persisted (x, y).
+    private func worldPosition(of skill: Skill) -> CGPoint {
+        if let dragOverride, draggingSkillId == skill.id {
+            return dragOverride
         }
+        return CGPoint(x: skill.x, y: skill.y)
+    }
+
+    // True iff the long-press began over a star — that's the signal
+    // CanvasGestureSurface uses to suppress pan for the rest of the
+    // gesture. Returning false means "no star here, let normal
+    // recognizers proceed".
+    private func beginDrag(
+        at location: CGPoint, transform: CanvasTransform
+    ) -> Bool {
+        guard let hit = hitTest(at: location, transform: transform) else {
+            return false
+        }
+        draggingSkillId = hit
+        // Initialize the override to the finger location in world
+        // coords so the very first render snaps the star under the
+        // finger (rather than leaving a one-frame visual gap).
+        dragOverride = screenToWorld(location)
+        return true
+    }
+
+    private func updateDrag(at location: CGPoint) {
+        guard draggingSkillId != nil else { return }
+        dragOverride = screenToWorld(location)
+    }
+
+    // On end, persist via Store.upsertSkill (LWW merge, bumps
+    // updatedAt) and ask the parent to refresh. We clear the override
+    // *after* the refresh has had a chance to land — clearing eagerly
+    // would snap the star back to its old position for one frame.
+    private func endDrag() {
+        guard let id = draggingSkillId, let target = dragOverride else {
+            draggingSkillId = nil
+            dragOverride = nil
+            return
+        }
+        draggingSkillId = nil
+        guard var skill = skills.first(where: { $0.id == id }) else {
+            dragOverride = nil
+            return
+        }
+        skill.x = Double(target.x)
+        skill.y = Double(target.y)
+        skill.updatedAt = Date()
+        Task {
+            do {
+                try await store.upsertSkill(skill)
+                await MainActor.run {
+                    onMutation()
+                    dragOverride = nil
+                }
+            } catch {
+                // Persist failed — drop the override so the canvas
+                // reverts to the last known good position. Throwing
+                // from a UI gesture has no good surface yet; quiet
+                // revert is better than a stuck "off by inches" star.
+                await MainActor.run { dragOverride = nil }
+            }
+        }
+    }
+
+    // screen = world * scale + offset  ⇒  world = (screen - offset) / scale
+    private func screenToWorld(_ p: CGPoint) -> CGPoint {
+        CGPoint(
+            x: (p.x - offset.width)  / scale,
+            y: (p.y - offset.height) / scale
+        )
     }
 
     // MARK: - Label density
