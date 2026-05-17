@@ -14,6 +14,7 @@ struct RootView: View {
     @State private var activeHobbies: Set<AreaID> = []
     @State private var selectedSkillId: SkillID? = nil
     @State private var reloadToken: Int = 0
+    @State private var showAddSheet: Bool = false
 
     @Environment(\.horizontalSizeClass) private var sizeClass
 
@@ -35,11 +36,13 @@ struct RootView: View {
             HobbyFilterView(
                 areas: areas,
                 active: $activeHobbies,
-                skillCount: visibleSkills.count
+                skillCount: visibleSkills.count,
+                onAdd: { showAddSheet = true }
             )
             .padding(.top, 12)
             .padding(.leading, 16)
         }
+        .sheet(isPresented: $showAddSheet) { addSheet }
         .overlay(alignment: .trailing) {
             if let selectedSkillId,
                let skill = skills.first(where: { $0.id == selectedSkillId })
@@ -70,12 +73,14 @@ struct RootView: View {
             HobbyFilterView(
                 areas: areas,
                 active: $activeHobbies,
-                skillCount: visibleSkills.count
+                skillCount: visibleSkills.count,
+                onAdd: { showAddSheet = true }
             )
             .padding(.top, 12)
             .padding(.leading, 12)
         }
         .background(Theme.Sky.bg1.ignoresSafeArea())
+        .sheet(isPresented: $showAddSheet) { addSheet }
         .sheet(
             isPresented: Binding(
                 get: { selectedSkillId != nil },
@@ -108,6 +113,22 @@ struct RootView: View {
             areas: areas,
             initialFocus: initialFocus,
             selectedSkillId: $selectedSkillId
+        )
+    }
+
+    // Shared between phone + pad sheet modifiers so the add flow is
+    // identical regardless of size class.
+    private var addSheet: some View {
+        AddSheet(
+            areas: areas,
+            store: context.store,
+            onClose: { showAddSheet = false },
+            onAdded: { areaId in
+                // Make sure the just-added thing's area is visible —
+                // otherwise the user "added" something they can't see.
+                activeHobbies.insert(areaId)
+                reloadToken &+= 1
+            }
         )
     }
 

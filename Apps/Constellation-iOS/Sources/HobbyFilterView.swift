@@ -10,15 +10,26 @@ struct HobbyFilterView: View {
     let areas: [Area]
     @Binding var active: Set<AreaID>
     let skillCount: Int
+    let onAdd: () -> Void
 
     @Environment(\.horizontalSizeClass) private var sizeClass
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("MY SKY")
-                .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                .tracking(2)
-                .foregroundStyle(.white.opacity(0.4))
+            HStack(spacing: 8) {
+                Text("MY SKY")
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .tracking(2)
+                    .foregroundStyle(.white.opacity(0.4))
+                Spacer(minLength: 8)
+                Button(action: onAdd) {
+                    Image(systemName: "plus.circle.fill")
+                        .font(.system(size: 18))
+                        .foregroundStyle(.white.opacity(0.75))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Add skill or hobby")
+            }
             Text("\(skillCount) stars · \(areas.count) hobbies")
                 .font(.system(size: 16, design: .serif))
                 .foregroundStyle(Theme.Sky.star)
