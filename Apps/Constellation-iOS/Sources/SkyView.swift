@@ -39,15 +39,12 @@ struct SkyView: View {
         self._selectedSkillId = selectedSkillId
     }
 
-    // Committed state — applied when a gesture ends.
+    // Canvas transform. Mutated directly by CanvasGestureSurface as
+    // pan/pinch tick, so there's no separate "in-flight delta" state
+    // to compose — the UIKit gestures already give us per-tick deltas
+    // we can apply incrementally.
     @State private var offset: CGSize = .zero
     @State private var scale: CGFloat = 0.5
-
-    // Live deltas while a gesture is in-flight. Composed with the
-    // committed state in `effectiveTransform` so we don't have to
-    // recompute the entire layout on every gesture tick.
-    @State private var dragDelta: CGSize = .zero
-    @State private var pinchDelta: CGFloat = 1.0
 
     @State private var didFit: Bool = false
 
@@ -202,33 +199,16 @@ struct SkyView: View {
                     )
                 }
             }
-            .contentShape(Rectangle())  // make whole canvas tappable
-            .gesture(
-                SimultaneousGesture(
-                    DragGesture()
-                        .onChanged { value in
-                            dragDelta = value.translation
-                        }
-                        .onEnded { value in
-                            offset.width += value.translation.width
-                            offset.height += value.translation.height
-                            dragDelta = .zero
-                        },
-                    MagnifyGesture()
-                        .onChanged { value in
-                            pinchDelta = value.magnification
-                        }
-                        .onEnded { value in
-                            let next = (scale * value.magnification)
-                                .zoomClamped(to: zoomBounds)
-                            scale = next
-                            pinchDelta = 1.0
-                        }
+            .overlay(
+                CanvasGestureSurface(
+                    offset: $offset,
+                    scale: $scale,
+                    zoomBounds: zoomBounds,
+                    onTap: { location in
+                        handleTap(at: location, in: geo.size, transform: transform)
+                    }
                 )
             )
-            .onTapGesture(coordinateSpace: .local) { location in
-                handleTap(at: location, in: geo.size, transform: transform)
-            }
             .onAppear { fitIfNeeded(into: geo.size) }
             .onChange(of: geo.size) { _, newSize in
                 fitIfNeeded(into: newSize)
@@ -248,11 +228,10 @@ struct SkyView: View {
     // MARK: - Transform composition
 
     private var effectiveTransform: CanvasTransform {
-        let s = (scale * pinchDelta).zoomClamped(to: zoomBounds)
-        return CanvasTransform(
-            scale: s,
-            offsetX: offset.width + dragDelta.width,
-            offsetY: offset.height + dragDelta.height
+        CanvasTransform(
+            scale: scale,
+            offsetX: offset.width,
+            offsetY: offset.height
         )
     }
 
