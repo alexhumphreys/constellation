@@ -20,13 +20,13 @@ struct AddSheet: View {
     let areas: [Area]
     let store: Store
     let onClose: () -> Void
-    // Fires after a successful save with the area the newly-added
-    // thing belongs to (== the area itself for `.area` mode, the
-    // skill's area for `.skill` mode). The parent uses this to
-    // (a) refresh the canvas and (b) make sure that area is visible
-    // in the hobby filter so the new item isn't hidden behind a
-    // toggled-off chip.
-    let onAdded: (AreaID) -> Void
+    // Fires after a successful save. First arg is the area the newly-
+    // added thing belongs to (== the area itself for `.area` mode, the
+    // skill's area for `.skill` mode) — parent uses it to refresh and
+    // make sure that area is visible. Second arg is the new skill's id
+    // for `.skill` mode (nil for `.area` mode) so the caller can focus
+    // the canvas on it or auto-select it as a prereq.
+    let onAdded: (AreaID, SkillID?) -> Void
 
     @State private var mode: Mode = .skill
 
@@ -165,15 +165,19 @@ struct AddSheet: View {
         errorMessage = nil
         Task {
             do {
-                let active: AreaID
+                let activeArea: AreaID
+                let newSkillId: SkillID?
                 switch mode {
                 case .skill:
-                    active = try await saveSkill()
+                    let saved = try await saveSkill()
+                    activeArea = saved.areaId
+                    newSkillId = saved.id
                 case .area:
-                    active = try await saveArea()
+                    activeArea = try await saveArea()
+                    newSkillId = nil
                 }
                 await MainActor.run {
-                    onAdded(active)
+                    onAdded(activeArea, newSkillId)
                     onClose()
                 }
             } catch {
@@ -185,24 +189,31 @@ struct AddSheet: View {
         }
     }
 
-    private func saveSkill() async throws -> AreaID {
+    private func saveSkill() async throws -> Skill {
         guard let areaId = skillAreaId,
               let area = areas.first(where: { $0.id == areaId })
         else {
             throw FormError("pick a hobby first")
         }
         let sid = try await uniqueSkillId(from: skillName.trimmed)
+        // Spread new stars instead of stacking them — without this,
+        // adding N skills to the same area drops them all at the
+        // exact center pixel and the user only ever sees the topmost.
+        // First add still lands at center; subsequent ones spiral out
+        // into the first slot that's clear of existing stars.
+        let areaSkills = try await store.skills().filter { $0.areaId == areaId && !$0.isDeleted }
+        let (x, y) = openSpot(near: area.centerX, near: area.centerY, avoiding: areaSkills)
         let skill = Skill(
             id: sid,
             areaId: areaId,
             name: skillName.trimmed,
             status: skillStatus,
-            x: area.centerX,
-            y: area.centerY,
+            x: x,
+            y: y,
             isFoundation: skillFoundation
         )
         try await store.upsertSkill(skill)
-        return areaId
+        return skill
     }
 
     private func saveArea() async throws -> AreaID {
@@ -261,6 +272,46 @@ struct AddSheet: View {
 }
 
 // MARK: - Helpers
+
+// Find a placement near (cx, cy) that isn't on top of an existing
+// star. Tries the center first (so the first skill in an empty area
+// still lands at the documented spot), then walks concentric rings of
+// 8 slots each, expanding by `step` per ring. Each ring is rotated by
+// a half-slot from the previous so adjacent rings don't line up
+// radially. Falls back to (cx, cy) after a bounded number of rings —
+// at that density the user's better off dragging-to-move anyway.
+private func openSpot(
+    near cx: Double, near cy: Double, avoiding existing: [Skill]
+) -> (Double, Double) {
+    let minSeparation: Double = 55
+    let step: Double = 45
+    let slotsPerRing = 8
+    let maxRings = 12
+
+    func clear(_ x: Double, _ y: Double) -> Bool {
+        for s in existing {
+            let dx = s.x - x
+            let dy = s.y - y
+            if (dx * dx + dy * dy).squareRoot() < minSeparation {
+                return false
+            }
+        }
+        return true
+    }
+
+    if clear(cx, cy) { return (cx, cy) }
+    for ring in 1...maxRings {
+        let radius = Double(ring) * step
+        let rotation = Double(ring) * (.pi / Double(slotsPerRing))
+        for slot in 0..<slotsPerRing {
+            let angle = rotation + Double(slot) * (2 * .pi / Double(slotsPerRing))
+            let x = cx + radius * cos(angle)
+            let y = cy + radius * sin(angle)
+            if clear(x, y) { return (x, y) }
+        }
+    }
+    return (cx, cy)
+}
 
 // Turn "Hip Key Drop" → "hip-key-drop". Keeps letters and digits,
 // folds whitespace / underscores / hyphens into single hyphens, and

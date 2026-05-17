@@ -43,6 +43,12 @@ enum SnapshotExport {
         let fmt = DateFormatter()
         fmt.dateFormat = "yyyy-MM-dd-HHmm"
         let stamp = fmt.string(from: Date())
+        // TODO: consider switching the extension to `.constellation.json`
+        // since the payload is plain JSON — would let macOS/iOS preview
+        // it with the system text viewer without us shipping a Quick
+        // Look extension, and signals "this is human-readable" to
+        // anyone who AirDrops it around. Touches the UTI registration
+        // in the Info.plist alongside the rename.
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("constellation-\(stamp).constellation")
         try data.write(to: url, options: .atomic)

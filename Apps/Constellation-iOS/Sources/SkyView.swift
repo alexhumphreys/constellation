@@ -32,6 +32,12 @@ struct SkyView: View {
     let store: Store
     let onMutation: () -> Void
     @Binding var selectedSkillId: SkillID?
+    // When set, pan/zoom to that skill and clear the binding. Lets the
+    // parent ask the canvas to recenter on a target after a state change
+    // (e.g. focusing a freshly-added skill so it doesn't get lost at
+    // whatever zoom the user was at).
+    @Binding var focusSkillId: SkillID?
+    let onAdd: () -> Void
 
     init(
         skills: [Skill],
@@ -40,7 +46,9 @@ struct SkyView: View {
         chainSkillIds: Set<SkillID> = [],
         store: Store,
         onMutation: @escaping () -> Void,
-        selectedSkillId: Binding<SkillID?>
+        selectedSkillId: Binding<SkillID?>,
+        focusSkillId: Binding<SkillID?> = .constant(nil),
+        onAdd: @escaping () -> Void = {}
     ) {
         self.skills = skills
         self.areas = areas
@@ -49,6 +57,8 @@ struct SkyView: View {
         self.store = store
         self.onMutation = onMutation
         self._selectedSkillId = selectedSkillId
+        self._focusSkillId = focusSkillId
+        self.onAdd = onAdd
     }
 
     // Canvas transform. Mutated directly by CanvasGestureSurface as
@@ -273,6 +283,9 @@ struct SkyView: View {
             .overlay(alignment: .bottomTrailing) {
                 resetButton(into: geo.size)
             }
+            .overlay(alignment: .bottomLeading) {
+                addButton
+            }
             .onAppear { fitIfNeeded(into: geo.size) }
             .onChange(of: geo.size) { _, newSize in
                 fitIfNeeded(into: newSize)
@@ -285,6 +298,24 @@ struct SkyView: View {
             // every time they pan and the parent recomputes the focus).
             .onChange(of: skills.count) { _, _ in
                 fitIfNeeded(into: geo.size)
+                // Retry a pending focus once the new skill lands in
+                // `skills` — the parent often sets focusSkillId in the
+                // same tick as it bumps the reload token, so the first
+                // attempt below misses (the new skill isn't here yet).
+                if let id = focusSkillId {
+                    tryFocusOnSkill(id: id, into: geo.size)
+                }
+            }
+            // External pan/zoom request: focus on a target skill, then
+            // clear the binding so the same skill can be re-targeted
+            // later. Animates so the user sees the canvas move toward
+            // the new star instead of teleporting under the inspector.
+            // If the skill isn't in the slice yet (parent reload in
+            // flight), leave the binding set — the .onChange(of:
+            // skills.count) above will retry once it arrives.
+            .onChange(of: focusSkillId) { _, newValue in
+                guard let id = newValue else { return }
+                tryFocusOnSkill(id: id, into: geo.size)
             }
         }
     }
@@ -399,6 +430,52 @@ struct SkyView: View {
         .accessibilityLabel("Reset view")
         .padding(.trailing, 16)
         .padding(.bottom, 24)
+    }
+
+    // Bottom-leading floating "+" mirroring the reset button's style —
+    // primary on-canvas affordance for adding skills/hobbies. The same
+    // action lives in HobbyFilterView's header but reads as decorative
+    // (Alex called it "very hidden"), so this is the discoverable one.
+    @ViewBuilder
+    private var addButton: some View {
+        Button(action: onAdd) {
+            Image(systemName: "plus")
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.85))
+                .frame(width: 48, height: 48)
+                .background(
+                    Circle()
+                        .fill(.black.opacity(0.30))
+                        .background(Circle().fill(.ultraThinMaterial))
+                        .overlay(Circle().stroke(.white.opacity(0.10), lineWidth: 1))
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Add skill or hobby")
+        .padding(.leading, 16)
+        .padding(.bottom, 24)
+    }
+
+    // Pan + zoom so the target skill lands at viewport center. Floor the
+    // zoom at 1.0 so the new star is comfortably readable; if the user
+    // was already zoomed in further, leave their zoom alone.
+    //
+    // Returns silently if the skill isn't in the slice yet — the caller
+    // re-tries via .onChange(of: skills.count) once the reload that
+    // produced this skill propagates down. Clearing the binding here
+    // (rather than at the call site) ensures we only clear once the
+    // animation actually ran.
+    private func tryFocusOnSkill(id: SkillID, into size: CGSize) {
+        guard let skill = skills.first(where: { $0.id == id }) else { return }
+        let s = max(CGFloat(1.0), scale).zoomClamped(to: zoomBounds)
+        withAnimation(.easeInOut(duration: 0.3)) {
+            scale = s
+            offset = CGSize(
+                width: size.width / 2 - CGFloat(skill.x) * s,
+                height: size.height / 2 - CGFloat(skill.y) * s
+            )
+        }
+        focusSkillId = nil
     }
 
     private func fitToBox(_ box: CGRect, padding: CGFloat, into size: CGSize) {

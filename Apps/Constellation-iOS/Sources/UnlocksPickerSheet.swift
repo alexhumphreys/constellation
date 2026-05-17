@@ -1,30 +1,31 @@
 import ConstellationCore
 import SwiftUI
 
-// Sheet for editing a skill's hard + soft prereqs. Mirrors the CLI's
-// `skill prereqs <id> <prereq-ids...>` but adds the UI affordances a
-// phone wants: a candidate list filtered to the same area by default
-// (toggle for cross-hobby prereqs), and a three-way per-row picker
-// (off / hard / soft) instead of forcing the user to type IDs.
-//
-// Save path goes through Store.upsertSkill so LWW + `skill.upsert`
-// wide events behave identically to the CLI.
-struct PrereqPickerSheet: View {
+// Inverse of PrereqPickerSheet: instead of "which skills come before
+// this one?", asks "which skills does this one unlock?". The data model
+// has no `unlocks` field — unlocks are derived from other skills'
+// prereqIds/softPrereqIds. So saving here writes to N other skills'
+// prereq lists rather than to this skill, which means N upsertSkill
+// calls (and N `skill.upsert` wide events). Acceptable: edits are
+// user-driven so N is small, and the store stays the source of truth
+// without us introducing a denormalised `unlockIds` field that would
+// drift out of sync with the prereq edges.
+struct UnlocksPickerSheet: View {
     let skill: Skill
     let allSkills: [Skill]
     let allAreas: [Area]
     let store: Store
     let onClose: () -> Void
     let onSaved: () -> Void
-    // RootView's add-completion handler (visibility flip + reload).
-    // Wired up so the inline "Create new skill" flow stays consistent
-    // with the canvas-level + button without coupling this sheet to
-    // RootView directly.
     let onSkillAdded: (AreaID, SkillID?) -> Void
 
     enum Kind { case hard, soft }
 
     @State private var picks: [SkillID: Kind] = [:]
+    // Snapshot of the initial state so save can compute a diff. Needed
+    // because removals (was-set, now-off) require touching the
+    // candidate's prereq list too, not just additions.
+    @State private var initialPicks: [SkillID: Kind] = [:]
     @State private var showAllAreas: Bool = false
     @State private var saving: Bool = false
     @State private var errorMessage: String? = nil
@@ -34,10 +35,6 @@ struct PrereqPickerSheet: View {
         Dictionary(uniqueKeysWithValues: allAreas.map { ($0.id, $0) })
     }
 
-    // Exclude self (a self-loop is meaningless) but allow cycles
-    // through other skills — graph traversals are depth-bounded with
-    // seen-sets, and soft "these two reinforce each other" cycles are
-    // a legitimate way to model mutually-reinforcing skills.
     private var candidates: [Skill] {
         allSkills
             .filter { $0.id != skill.id && !$0.isDeleted }
@@ -59,9 +56,8 @@ struct PrereqPickerSheet: View {
                         .font(.caption2)
                 }
 
-                // Chain creations: when the prereq the user wants
-                // doesn't exist yet, open AddSheet right here instead
-                // of forcing a cancel → '+' → re-open dance.
+                // Same chain-creation affordance as PrereqPickerSheet —
+                // useful when the next-step skill doesn't exist yet.
                 Section {
                     Button {
                         showAddSheet = true
@@ -100,7 +96,7 @@ struct PrereqPickerSheet: View {
             }
             .scrollContentBackground(.hidden)
             .background(Theme.Sky.bg2)
-            .navigationTitle("Prerequisites")
+            .navigationTitle("Unlocks")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -119,24 +115,9 @@ struct PrereqPickerSheet: View {
                     store: store,
                     onClose: { showAddSheet = false },
                     onAdded: { areaId, newSkillId in
-                        // Refresh visibility + data via the parent's
-                        // shared handler so this flow behaves
-                        // identically to the canvas-level + button.
                         onSkillAdded(areaId, newSkillId)
-                        // Auto-wire as a hard prereq so the user's
-                        // create-then-link intent doesn't need a
-                        // second tap. They can flip to soft or off
-                        // afterwards if needed.
                         if let newSkillId {
                             picks[newSkillId] = .hard
-                            // Reveal cross-hobby candidates if the new
-                            // skill lives in a different area than the
-                            // one being edited — otherwise it wouldn't
-                            // appear in the filtered list. Use the
-                            // areaId from the callback rather than
-                            // re-looking-up via allSkills, which is a
-                            // let prop and still stale at this point
-                            // (parent reload is async).
                             if areaId != skill.areaId {
                                 showAllAreas = true
                             }
@@ -149,9 +130,9 @@ struct PrereqPickerSheet: View {
 
     private var emptyMessage: String {
         if showAllAreas {
-            return "No other skills exist yet — add some from the '+' button."
+            return "No other skills exist yet — use 'Create new skill' above."
         }
-        return "No other skills in \(currentAreaName). Toggle 'Show all hobbies' to wire cross-hobby prereqs."
+        return "No other skills in \(currentAreaName). Toggle 'Show all hobbies' to wire cross-hobby unlocks."
     }
 
     private func row(for candidate: Skill) -> some View {
@@ -218,39 +199,59 @@ struct PrereqPickerSheet: View {
         .buttonStyle(.plain)
     }
 
+    // Walk every other skill; a candidate is currently picked iff our
+    // skill.id appears in its prereq list. Auto-flip the cross-area
+    // toggle if any current unlock lives in another hobby — without it
+    // the user would open the picker and see their cross-area unlocks
+    // missing from the visible list.
     private func seedPicks() {
         var initial: [SkillID: Kind] = [:]
-        for id in skill.prereqIds { initial[id] = .hard }
-        for id in skill.softPrereqIds { initial[id] = .soft }
-        picks = initial
-        // If any existing prereq lives outside the current area, default
-        // the cross-area toggle on — otherwise the user opens the sheet
-        // and can't see the prereqs they've already wired up.
-        let hasCrossArea = initial.keys.contains { id in
-            guard let s = allSkills.first(where: { $0.id == id }) else { return false }
-            return s.areaId != skill.areaId
+        var crossArea = false
+        for candidate in allSkills where candidate.id != skill.id {
+            if candidate.prereqIds.contains(skill.id) {
+                initial[candidate.id] = .hard
+                if candidate.areaId != skill.areaId { crossArea = true }
+            } else if candidate.softPrereqIds.contains(skill.id) {
+                initial[candidate.id] = .soft
+                if candidate.areaId != skill.areaId { crossArea = true }
+            }
         }
-        if hasCrossArea { showAllAreas = true }
+        picks = initial
+        initialPicks = initial
+        if crossArea { showAllAreas = true }
     }
 
     private func save() {
         saving = true
         errorMessage = nil
+        let mySkillId = skill.id
+        let before = initialPicks
+        let after = picks
+        // Diff: union of keys with state that differs. Each entry is
+        // one candidate that needs its prereq list rewritten + a
+        // single upsertSkill call.
+        let changedIds = Set(before.keys).union(after.keys).filter { id in
+            before[id] != after[id]
+        }
         Task {
             do {
-                guard var updated = try await store.skill(skill.id) else {
-                    throw FormError("skill no longer exists")
+                for cid in changedIds {
+                    guard var c = try await store.skill(cid) else { continue }
+                    c.prereqIds.removeAll { $0 == mySkillId }
+                    c.softPrereqIds.removeAll { $0 == mySkillId }
+                    switch after[cid] {
+                    case .hard:
+                        c.prereqIds.append(mySkillId)
+                    case .soft:
+                        c.softPrereqIds.append(mySkillId)
+                    case nil:
+                        break
+                    }
+                    c.prereqIds.sort { $0.rawValue < $1.rawValue }
+                    c.softPrereqIds.sort { $0.rawValue < $1.rawValue }
+                    c.updatedAt = Date()
+                    try await store.upsertSkill(c)
                 }
-                updated.prereqIds = picks
-                    .filter { $0.value == .hard }
-                    .map { $0.key }
-                    .sorted { $0.rawValue < $1.rawValue }
-                updated.softPrereqIds = picks
-                    .filter { $0.value == .soft }
-                    .map { $0.key }
-                    .sorted { $0.rawValue < $1.rawValue }
-                updated.updatedAt = Date()
-                try await store.upsertSkill(updated)
                 await MainActor.run { onSaved() }
             } catch {
                 await MainActor.run {
@@ -259,11 +260,5 @@ struct PrereqPickerSheet: View {
                 }
             }
         }
-    }
-
-    private struct FormError: LocalizedError {
-        let message: String
-        init(_ message: String) { self.message = message }
-        var errorDescription: String? { message }
     }
 }

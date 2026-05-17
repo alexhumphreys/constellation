@@ -19,6 +19,11 @@ struct RootView: View {
     @State private var chainSkillId: SkillID? = nil
     @State private var reloadToken: Int = 0
     @State private var showAddSheet: Bool = false
+    // Set when we want SkyView to pan/zoom onto a specific skill —
+    // primarily right after adding a new one so it doesn't drop at the
+    // area center and immediately get lost behind existing stars. SkyView
+    // clears the binding once the focus animation kicks off.
+    @State private var pendingFocusSkillId: SkillID? = nil
     // Snapshot share sheet (export → AirDrop). URL is set after the
     // background JSON write finishes; presentation is bound to its
     // presence so the sheet only opens once the file actually exists.
@@ -124,7 +129,8 @@ struct RootView: View {
                     onClose: { self.selectedSkillId = nil },
                     onSelect: { self.selectedSkillId = $0 },
                     onMutation: { reloadToken &+= 1 },
-                    onToggleChain: { toggleChain(for: skill.id) }
+                    onToggleChain: { toggleChain(for: skill.id) },
+                    onSkillAdded: handleAddCompleted
                 )
                 .frame(width: 420)
                 .background(Theme.Sky.bg2.opacity(0.96))
@@ -170,7 +176,8 @@ struct RootView: View {
                     onClose: { selectedSkillId = nil },
                     onSelect: { selectedSkillId = $0 },
                     onMutation: { reloadToken &+= 1 },
-                    onToggleChain: { toggleChain(for: skill.id) }
+                    onToggleChain: { toggleChain(for: skill.id) },
+                    onSkillAdded: handleAddCompleted
                 )
                 .presentationDetents([.medium, .large])
                 .presentationBackground(Theme.Sky.bg2)
@@ -187,7 +194,9 @@ struct RootView: View {
             chainSkillIds: chainSkillIds,
             store: context.store,
             onMutation: { reloadToken &+= 1 },
-            selectedSkillId: $selectedSkillId
+            selectedSkillId: $selectedSkillId,
+            focusSkillId: $pendingFocusSkillId,
+            onAdd: { showAddSheet = true }
         )
     }
 
@@ -226,13 +235,27 @@ struct RootView: View {
             areas: areas,
             store: context.store,
             onClose: { showAddSheet = false },
-            onAdded: { areaId in
-                // Make sure the just-added thing's area is visible —
-                // otherwise the user "added" something they can't see.
-                activeHobbies.insert(areaId)
-                reloadToken &+= 1
+            onAdded: { areaId, skillId in
+                handleAddCompleted(areaId: areaId, skillId: skillId)
+                // Pan/zoom the canvas onto the new star and open its
+                // inspector — addresses "easy to lose newly added
+                // skills" (they drop at the area center and otherwise
+                // disappear behind whatever's at that spot).
+                if let skillId {
+                    pendingFocusSkillId = skillId
+                    selectedSkillId = skillId
+                }
             }
         )
+    }
+
+    // Common bookkeeping after any add (canvas-level or nested in the
+    // prereq picker): make the area visible so the new thing isn't
+    // hidden behind a toggled-off chip, and bump the reload token so
+    // the data flows back through .task(id: reloadToken).
+    private func handleAddCompleted(areaId: AreaID, skillId: SkillID?) {
+        activeHobbies.insert(areaId)
+        reloadToken &+= 1
     }
 
     private var visibleSkills: [Skill] {

@@ -29,6 +29,12 @@ struct SkillDetailView: View {
     let onSelect: (SkillID) -> Void
     let onMutation: () -> Void
     let onToggleChain: () -> Void
+    // Called when a child sheet (PrereqPickerSheet's inline AddSheet)
+    // creates a brand-new skill or area, so RootView can flip its
+    // visibility on and bump the reload token. Separate from
+    // onMutation so the callee can distinguish "data changed" from
+    // "a new entity was just born".
+    let onSkillAdded: (AreaID, SkillID?) -> Void
 
     @State private var sessions: [Session] = []
     @State private var notes: [Note] = []
@@ -37,6 +43,7 @@ struct SkillDetailView: View {
     @State private var draftNote: String = ""
     @State private var isSaving: Bool = false
     @State private var showPrereqPicker: Bool = false
+    @State private var showUnlocksPicker: Bool = false
     // Clip-sheet state. `editingClip = nil && showClipSheet = true`
     // means "add"; `editingClip = <clip>` means "edit that clip". We
     // bind `showClipSheet` to the sheet so dismissal works for both.
@@ -51,11 +58,7 @@ struct SkillDetailView: View {
                 header
                 statusPicker
                 prereqsBlock(neighbours: graph.neighbours(of: skill.id))
-                if let n = graph.neighbours(of: skill.id), !n.unlocks.isEmpty {
-                    section("THIS UNLOCKS") {
-                        chipRow(n.unlocks)
-                    }
-                }
+                unlocksBlock(neighbours: graph.neighbours(of: skill.id))
                 clipsSection
                 sessionSection
                 notesSection
@@ -75,7 +78,22 @@ struct SkillDetailView: View {
                 onSaved: {
                     showPrereqPicker = false
                     onMutation()
-                }
+                },
+                onSkillAdded: onSkillAdded
+            )
+        }
+        .sheet(isPresented: $showUnlocksPicker) {
+            UnlocksPickerSheet(
+                skill: skill,
+                allSkills: allSkills,
+                allAreas: allAreas,
+                store: store,
+                onClose: { showUnlocksPicker = false },
+                onSaved: {
+                    showUnlocksPicker = false
+                    onMutation()
+                },
+                onSkillAdded: onSkillAdded
             )
         }
         .sheet(isPresented: $showClipSheet, onDismiss: { editingClip = nil }) {
@@ -90,6 +108,43 @@ struct SkillDetailView: View {
                     onMutation()
                 }
             )
+        }
+    }
+
+    // Mirrors prereqsBlock — always-rendered, with an EDIT pill that
+    // opens a picker. Unlocks aren't a field on this skill (they're
+    // derived from OTHER skills' prereq lists), so saving from the
+    // picker writes to N other skills' prereqIds rather than to this
+    // one. The asymmetry is invisible to the user.
+    @ViewBuilder
+    private func unlocksBlock(neighbours n: SkillGraph.Neighbours?) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("THIS UNLOCKS")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .tracking(1.6)
+                    .foregroundStyle(.white.opacity(0.45))
+                Spacer()
+                Button { showUnlocksPicker = true } label: {
+                    Text("EDIT")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .tracking(1.2)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4)
+                        .overlay(
+                            Capsule().stroke(.white.opacity(0.25), lineWidth: 1)
+                        )
+                        .foregroundStyle(.white.opacity(0.75))
+                }
+                .buttonStyle(.plain)
+            }
+            if let n, !n.unlocks.isEmpty {
+                chipRow(n.unlocks)
+            } else {
+                Text("None yet — tap EDIT to mark what this skill unlocks.")
+                    .font(.system(size: 13, design: .serif))
+                    .foregroundStyle(.white.opacity(0.45))
+            }
         }
     }
 
