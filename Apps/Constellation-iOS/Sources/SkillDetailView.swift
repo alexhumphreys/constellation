@@ -35,6 +35,10 @@ struct SkillDetailView: View {
     // onMutation so the callee can distinguish "data changed" from
     // "a new entity was just born".
     let onSkillAdded: (AreaID, SkillID?) -> Void
+    // Fires after the edit sheet tombstones the current skill. RootView
+    // clears `selectedSkillId` and reloads so the now-deleted inspector
+    // doesn't linger on a star that's vanished from the canvas.
+    let onSkillDeleted: () -> Void
 
     @State private var sessions: [Session] = []
     @State private var notes: [Note] = []
@@ -49,6 +53,7 @@ struct SkillDetailView: View {
     // bind `showClipSheet` to the sheet so dismissal works for both.
     @State private var showClipSheet: Bool = false
     @State private var editingClip: Clip? = nil
+    @State private var showEditSheet: Bool = false
 
     private var graph: SkillGraph { SkillGraph(allSkills) }
 
@@ -106,6 +111,22 @@ struct SkillDetailView: View {
                     showClipSheet = false
                     Task { await reload() }
                     onMutation()
+                }
+            )
+        }
+        .sheet(isPresented: $showEditSheet) {
+            EditSkillSheet(
+                skill: skill,
+                areas: allAreas,
+                store: store,
+                onClose: { showEditSheet = false },
+                onSaved: {
+                    showEditSheet = false
+                    onMutation()
+                },
+                onDeleted: {
+                    showEditSheet = false
+                    onSkillDeleted()
                 }
             )
         }
@@ -209,6 +230,7 @@ struct SkillDetailView: View {
                 }
                 Spacer()
                 tracePill
+                editMenu
                 Button(action: onClose) {
                     Image(systemName: "xmark.circle.fill")
                         .foregroundStyle(.white.opacity(0.4))
@@ -218,6 +240,25 @@ struct SkillDetailView: View {
             Text(skill.name)
                 .font(.system(size: 30, weight: .regular, design: .serif))
                 .foregroundStyle(Theme.Sky.star)
+        }
+    }
+
+    // Ellipsis menu sitting between TRACE and the close X. Houses the
+    // skill-level edit/delete affordances so the header doesn't grow
+    // a fourth pill — discoverability via the standard iOS ⋯ icon.
+    // Delete sits inside EditSkillSheet rather than the menu so the
+    // confirmation has the full edit context (name, hobby) visible.
+    private var editMenu: some View {
+        Menu {
+            Button {
+                showEditSheet = true
+            } label: {
+                Label("Edit skill", systemImage: "pencil")
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+                .foregroundStyle(.white.opacity(0.45))
+                .imageScale(.large)
         }
     }
 

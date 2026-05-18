@@ -280,7 +280,10 @@ struct AddSheet: View {
 // a half-slot from the previous so adjacent rings don't line up
 // radially. Falls back to (cx, cy) after a bounded number of rings —
 // at that density the user's better off dragging-to-move anyway.
-private func openSpot(
+// Made module-internal so EditSkillSheet can reuse this when a skill
+// is moved to a different hobby (re-drops it at the destination
+// area's center, spiraling out to avoid stacking).
+func openSpot(
     near cx: Double, near cy: Double, avoiding existing: [Skill]
 ) -> (Double, Double) {
     let minSeparation: Double = 55
@@ -338,7 +341,8 @@ private func slugify(_ s: String) -> String {
 // the round-trip with `Area.color` (which parses 6-digit hex) lines
 // up. Clamps to [0,1] because ColorPicker can return out-of-gamut
 // values in extended ranges.
-private func hexString(from color: Color) -> String {
+// Module-internal so EditHobbySheet's ColorPicker save path can reuse it.
+func hexString(from color: Color) -> String {
     let ui = UIColor(color)
     var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
     ui.getRed(&r, green: &g, blue: &b, alpha: &a)

@@ -12,6 +12,11 @@ struct HobbyFilterView: View {
     let skillCount: Int
     let onAdd: () -> Void
     let onShare: () -> Void
+    // Long-press on a chip → contextMenu → "Edit hobby" hands the area
+    // off to RootView, which opens EditHobbySheet. Kept as a callback
+    // rather than presenting the sheet from here so the parent owns
+    // sheet state alongside the other top-level sheets.
+    let onEdit: (Area) -> Void
 
     @Environment(\.horizontalSizeClass) private var sizeClass
 
@@ -65,7 +70,8 @@ struct HobbyFilterView: View {
                 Chip(
                     area: area,
                     on: active.contains(area.id),
-                    toggle: { toggle(area.id) }
+                    toggle: { toggle(area.id) },
+                    onEdit: { onEdit(area) }
                 )
             }
         }
@@ -85,6 +91,7 @@ private struct Chip: View {
     let area: Area
     let on: Bool
     let toggle: () -> Void
+    let onEdit: () -> Void
 
     var body: some View {
         Button(action: toggle) {
@@ -112,5 +119,12 @@ private struct Chip: View {
             .foregroundStyle(on ? .white : .white.opacity(0.45))
         }
         .buttonStyle(.plain)
+        .contextMenu {
+            Button {
+                onEdit()
+            } label: {
+                Label("Edit hobby", systemImage: "pencil")
+            }
+        }
     }
 }

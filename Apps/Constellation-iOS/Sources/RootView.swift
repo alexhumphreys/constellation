@@ -34,6 +34,10 @@ struct RootView: View {
     @State private var pendingImport: SnapshotImport.Preview? = nil
     @State private var importError: String? = nil
     @State private var importSourceName: String = ""
+    // Area currently being edited via EditHobbySheet. Bound to a
+    // single sheet so we don't need a separate isPresented flag —
+    // non-nil ⇒ sheet open.
+    @State private var editingArea: Area? = nil
 
     @Environment(\.horizontalSizeClass) private var sizeClass
 
@@ -98,6 +102,27 @@ struct RootView: View {
         } message: {
             Text(importError ?? "")
         }
+        .sheet(isPresented: Binding(
+            get: { editingArea != nil },
+            set: { if !$0 { editingArea = nil } }
+        )) {
+            if let area = editingArea {
+                EditHobbySheet(
+                    area: area,
+                    store: context.store,
+                    onClose: { editingArea = nil },
+                    onSaved: {
+                        editingArea = nil
+                        reloadToken &+= 1
+                    },
+                    onDeleted: {
+                        editingArea = nil
+                        activeHobbies.remove(area.id)
+                        reloadToken &+= 1
+                    }
+                )
+            }
+        }
     }
 
     // ── iPad layout: canvas + side inspector on selection ──
@@ -109,7 +134,8 @@ struct RootView: View {
                 active: $activeHobbies,
                 skillCount: visibleSkills.count,
                 onAdd: { showAddSheet = true },
-                onShare: { Task { await prepareExport() } }
+                onShare: { Task { await prepareExport() } },
+                onEdit: { editingArea = $0 }
             )
             .padding(.top, 12)
             .padding(.leading, 16)
@@ -130,7 +156,11 @@ struct RootView: View {
                     onSelect: { self.selectedSkillId = $0 },
                     onMutation: { reloadToken &+= 1 },
                     onToggleChain: { toggleChain(for: skill.id) },
-                    onSkillAdded: handleAddCompleted
+                    onSkillAdded: handleAddCompleted,
+                    onSkillDeleted: {
+                        self.selectedSkillId = nil
+                        reloadToken &+= 1
+                    }
                 )
                 .frame(width: 420)
                 .background(Theme.Sky.bg2.opacity(0.96))
@@ -150,7 +180,8 @@ struct RootView: View {
                 active: $activeHobbies,
                 skillCount: visibleSkills.count,
                 onAdd: { showAddSheet = true },
-                onShare: { Task { await prepareExport() } }
+                onShare: { Task { await prepareExport() } },
+                onEdit: { editingArea = $0 }
             )
             .padding(.top, 12)
             .padding(.leading, 12)
@@ -177,7 +208,11 @@ struct RootView: View {
                     onSelect: { selectedSkillId = $0 },
                     onMutation: { reloadToken &+= 1 },
                     onToggleChain: { toggleChain(for: skill.id) },
-                    onSkillAdded: handleAddCompleted
+                    onSkillAdded: handleAddCompleted,
+                    onSkillDeleted: {
+                        self.selectedSkillId = nil
+                        reloadToken &+= 1
+                    }
                 )
                 .presentationDetents([.medium, .large])
                 .presentationBackground(Theme.Sky.bg2)
