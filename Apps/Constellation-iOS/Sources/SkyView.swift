@@ -97,6 +97,34 @@ struct SkyView: View {
                     with: .color(Theme.Sky.bg1)
                 )
 
+                // Faint background star field. Deterministic positions
+                // (seeded once) and rendered through a *dampened*
+                // transform — dots only move 40% as much as the
+                // foreground when panning, and 70% as much when
+                // zooming. That mismatch is the parallax cue: a sky
+                // that sits behind the skill graph rather than glued
+                // to it. The seeded region overshoots world bounds by
+                // 50% on each side so the screen stays covered at
+                // extreme pan.
+                let bgScale = Swift.max(0.6, transform.scale * 0.7)
+                let bgOffsetX = transform.offsetX * 0.4
+                let bgOffsetY = transform.offsetY * 0.4
+                for dot in Self.bgDots {
+                    let px = dot.x * bgScale + bgOffsetX
+                    let py = dot.y * bgScale + bgOffsetY
+                    if px < -2 || py < -2 || px > size.width + 2 || py > size.height + 2 {
+                        continue
+                    }
+                    let r = dot.r
+                    let rect = CGRect(
+                        x: px - r, y: py - r, width: r * 2, height: r * 2
+                    )
+                    context.fill(
+                        Path(ellipseIn: rect),
+                        with: .color(Theme.Sky.star.opacity(dot.alpha))
+                    )
+                }
+
                 // Prereq edges first so stars sit on top. While
                 // a star is being dragged, both endpoints of any
                 // edge it touches need to use the override world
@@ -133,7 +161,7 @@ struct SkyView: View {
                                 path,
                                 with: .color(Theme.Sky.star.opacity(
                                     opacityForEdge(skill: skill, prereq: prereq))),
-                                lineWidth: 0.6
+                                lineWidth: 0.8
                             )
                         }
                     }
@@ -164,10 +192,19 @@ struct SkyView: View {
                                 style: StrokeStyle(lineWidth: 1.6, dash: [3, 3])
                             )
                         } else {
+                            // Soft prereq, non-chain: faint dashed, but
+                            // dialed up from the original 0.06 so the
+                            // soft graph is actually decodable on the
+                            // canvas (was almost invisible at default
+                            // zoom). Dash kept tight so it still reads
+                            // as "lighter" next to a hard edge.
+                            let isAdjacent = selectedSkillId == skill.id
+                                || selectedSkillId == prereq.id
+                            let alpha = isAdjacent ? 0.40 : 0.14
                             context.stroke(
                                 path,
-                                with: .color(Theme.Sky.star.opacity(0.06)),
-                                style: StrokeStyle(lineWidth: 0.6, dash: [3, 3])
+                                with: .color(Theme.Sky.star.opacity(alpha)),
+                                style: StrokeStyle(lineWidth: 0.7, dash: [2.5, 3.5])
                             )
                         }
                     }
@@ -236,6 +273,23 @@ struct SkyView: View {
                         )
                     }
 
+                    // Drill = solid bright ring in the area tint. Reads
+                    // as "this is the live one." Animation (true pulse)
+                    // would need TimelineView and a per-frame redraw —
+                    // deferred; the static ring already pops because
+                    // it's solid against the dashed/no-ring neighbours.
+                    if visual.ring == .pulse {
+                        let r = visual.size + 4
+                        let rect = CGRect(
+                            x: p.x - r, y: p.y - r, width: r * 2, height: r * 2
+                        )
+                        context.stroke(
+                            Path(ellipseIn: rect),
+                            with: .color(tint.opacity(opacity * 0.95)),
+                            lineWidth: 1.4
+                        )
+                    }
+
                     // Selection ring on the focused star — uses the area
                     // tint at full saturation plus a faint outer dashed
                     // halo, matching the SkyNode design.
@@ -265,18 +319,32 @@ struct SkyView: View {
                 // drilling stars, the currently selected/neighbour set;
                 // hide everything else when zoomed out so the canvas
                 // doesn't read as soup.
+                //
+                // Each label gets a thin scrim behind the text so it
+                // stays readable when it overlaps a prereq edge or
+                // another star's glow. Without it, 12pt serif on dark
+                // sky melts into anything bright passing underneath.
                 for skill in skills where shouldLabel(skill, scale: transform.scale) {
                     let w = worldPosition(of: skill)
                     let p = transform.apply(w.x, w.y)
                     let visual = StatusVisual.of(skill.status)
                     let text = Text(skill.name)
-                        .font(.system(size: 11, weight: .regular, design: .serif))
-                        .foregroundStyle(Theme.Sky.star.opacity(0.95))
-                    context.draw(
-                        text,
-                        at: CGPoint(x: p.x + visual.size + 6, y: p.y),
-                        anchor: .leading
+                        .font(.system(size: 12, weight: .medium, design: .serif))
+                        .foregroundStyle(Theme.Sky.star)
+                    let resolved = context.resolve(text)
+                    let textSize = resolved.measure(in: CGSize(width: 220, height: 40))
+                    let origin = CGPoint(x: p.x + visual.size + 6, y: p.y)
+                    let scrimRect = CGRect(
+                        x: origin.x - 3,
+                        y: origin.y - textSize.height / 2 - 1,
+                        width: textSize.width + 6,
+                        height: textSize.height + 2
                     )
+                    context.fill(
+                        Path(roundedRect: scrimRect, cornerRadius: 3),
+                        with: .color(Theme.Sky.bg1.opacity(0.55))
+                    )
+                    context.draw(resolved, at: origin, anchor: .leading)
                 }
             }
             .overlay(
@@ -637,9 +705,55 @@ struct SkyView: View {
     // chain-tracing UI.
     private func opacityForEdge(skill: Skill, prereq: Skill) -> Double {
         if selectedSkillId == skill.id || selectedSkillId == prereq.id {
-            return 0.55
+            return 0.70
         }
-        return 0.10
+        return 0.18
+    }
+
+    // Background star-field positions. Computed once via a deterministic
+    // pseudo-random walk over an oversized region (world bounds +50%
+    // padding each side) so the parallax-dampened render stays covered
+    // at extreme pan/zoom. Stable across launches — feels like a real
+    // sky, not a procedurally-jittered overlay.
+    struct BackgroundDot { let x: Double; let y: Double; let r: CGFloat; let alpha: Double }
+    static let bgDots: [BackgroundDot] = {
+        var rng = SplitMix64(seed: 0x510D_C0DE_BEEF)
+        var dots: [BackgroundDot] = []
+        let count = 320
+        dots.reserveCapacity(count)
+        // Seed over [-1200, 3600] x [-800, 2400] — the world plus a
+        // 50%-on-each-side margin. Density is held roughly constant
+        // (~1 dot per 6_000 sqpt) so the field doesn't look sparser
+        // than the old smaller seeding.
+        for _ in 0..<count {
+            let x = -1200 + rng.nextDouble() * 4800
+            let y = -800  + rng.nextDouble() * 3200
+            let bright = rng.nextDouble()
+            // Most dots tiny + faint, a handful brighter to suggest depth.
+            let r: CGFloat = bright > 0.92 ? 0.9 : (bright > 0.75 ? 0.6 : 0.4)
+            let alpha = 0.10 + bright * 0.18   // 0.10 … 0.28
+            dots.append(BackgroundDot(x: x, y: y, r: r, alpha: alpha))
+        }
+        return dots
+    }()
+}
+
+// Inline deterministic RNG so the background-dot positions don't depend
+// on SystemRandomNumberGenerator (which would re-seed per launch and
+// make the sky shift every time the app opened). Tiny implementation —
+// not crypto, just stable seeding.
+private struct SplitMix64 {
+    var state: UInt64
+    init(seed: UInt64) { self.state = seed }
+    mutating func next() -> UInt64 {
+        state &+= 0x9E37_79B9_7F4A_7C15
+        var z = state
+        z = (z ^ (z &>> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z &>> 27)) &* 0x94D0_49BB_1331_11EB
+        return z ^ (z &>> 31)
+    }
+    mutating func nextDouble() -> Double {
+        Double(next() &>> 11) / Double(1 &<< 53)
     }
 }
 

@@ -16,11 +16,19 @@ enum Theme {
     }
 }
 
-// Per-status visual treatment matching the design's STATUS table.
-// `glow` is the radius of the soft halo behind the star; `size` is the
-// star's radius. `ringStyle` is reserved for the dashed/pulse rings —
-// v1 just renders the dashed ring for `.next`; pulse for `.drill` is
-// deferred so the canvas stays simple.
+// Per-status visual treatment. Each visual axis carries exactly one
+// semantic, so the user can decode a star at a glance:
+//
+//   size    = mastery   (monotonic locked → master)
+//   opacity = mastery   (monotonic locked → master)
+//   glow    = activity  (peak at drill — the "actively practicing" state)
+//   ring    = state cue (dashed = next/call-to-try, pulse = drill/active)
+//
+// Mastery progression: locked → wish → next → drill → got → master.
+// Drill sits below got in mastery (you've started but it isn't solid),
+// but reads as the most attention-grabbing on the canvas because of its
+// glow + pulse ring — that's the "this is what you're working on right
+// now" cue.
 struct StatusVisual: Hashable {
     let size: CGFloat
     let glow: CGFloat
@@ -31,12 +39,12 @@ struct StatusVisual: Hashable {
 
     static func of(_ status: SkillStatus) -> StatusVisual {
         switch status {
-        case .master: StatusVisual(size: 4.5, glow: 18, opacity: 1.00, ring: .none)
-        case .got:    StatusVisual(size: 3.5, glow: 10, opacity: 0.95, ring: .none)
-        case .drill:  StatusVisual(size: 4.0, glow: 22, opacity: 1.00, ring: .pulse)
-        case .next:   StatusVisual(size: 3.2, glow: 14, opacity: 0.90, ring: .dashed)
-        case .wish:   StatusVisual(size: 2.4, glow: 6,  opacity: 0.75, ring: .none)
-        case .locked: StatusVisual(size: 1.8, glow: 0,  opacity: 0.45, ring: .none)
+        case .master: StatusVisual(size: 5.0, glow: 16, opacity: 1.00, ring: .none)
+        case .got:    StatusVisual(size: 4.2, glow: 10, opacity: 0.95, ring: .none)
+        case .drill:  StatusVisual(size: 3.6, glow: 22, opacity: 1.00, ring: .pulse)
+        case .next:   StatusVisual(size: 3.0, glow: 8,  opacity: 0.85, ring: .dashed)
+        case .wish:   StatusVisual(size: 2.4, glow: 4,  opacity: 0.65, ring: .none)
+        case .locked: StatusVisual(size: 1.8, glow: 0,  opacity: 0.40, ring: .none)
         }
     }
 }
