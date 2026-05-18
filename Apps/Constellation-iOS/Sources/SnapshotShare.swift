@@ -15,6 +15,14 @@ import UniformTypeIdentifiers
 // Import path: see RootView's `.onOpenURL` — iOS routes a received
 // `.constellation` file to the app, which decodes + merges via the
 // existing CRDT path (Store.merge).
+//
+// On the filename: the extension is `.constellation` so iOS UTI
+// matching routes back to us (`public.filename-extension` only honors
+// the suffix after the last dot — a `.thing.json` double extension
+// reads as `json` and breaks the round-trip). We jam "json" into the
+// basename as a textual breadcrumb so a curious recipient knows the
+// payload is JSON and can Right-click → Open With → TextEdit to peek
+// inside. A real inline preview would need a Quick Look extension.
 
 extension UTType {
     // Mirrors the exported declaration in project.yml. Used by the
@@ -43,14 +51,8 @@ enum SnapshotExport {
         let fmt = DateFormatter()
         fmt.dateFormat = "yyyy-MM-dd-HHmm"
         let stamp = fmt.string(from: Date())
-        // TODO: consider switching the extension to `.constellation.json`
-        // since the payload is plain JSON — would let macOS/iOS preview
-        // it with the system text viewer without us shipping a Quick
-        // Look extension, and signals "this is human-readable" to
-        // anyone who AirDrops it around. Touches the UTI registration
-        // in the Info.plist alongside the rename.
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("constellation-\(stamp).constellation")
+            .appendingPathComponent("constellation-json-\(stamp).constellation")
         try data.write(to: url, options: .atomic)
         return url
     }
