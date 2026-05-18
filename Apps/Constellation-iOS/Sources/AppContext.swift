@@ -13,6 +13,7 @@ import os
 @MainActor
 final class AppContext {
     let store: Store
+    let peerSync = PeerSync()
 
     init() throws {
         let url = Self.storeURL()
@@ -25,6 +26,13 @@ final class AppContext {
         guard areas.isEmpty else { return }
         Self.logger.info("empty store; seeding from SeedData")
         try await store.merge(SeedData.snapshot())
+    }
+
+    // Start MultipeerConnectivity sync once the local store has been
+    // seeded. Observers watch `peerSync.pullCount` to react to inbound
+    // snapshot merges from peers.
+    func startPeerSync() {
+        peerSync.start(store: store)
     }
 
     static func storeURL() -> URL {

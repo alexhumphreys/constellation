@@ -408,6 +408,18 @@ public actor Store {
 
     // MARK: - Wide events / journal
 
+    // Public emit path for callers outside the Store that still want
+    // their business-logic observability to land in the same
+    // wide_events table the journal CLI reads. Used by the iOS app's
+    // PeerSync (peer.connect, peer.snapshot.send, etc.) so MC sync
+    // shows up in the journal alongside store mutations. The sink
+    // fan-out is the same as internal events.
+    public func emit(_ event: WideEvent) throws {
+        try writer.write { db in
+            try insertEvent(db, event)
+        }
+    }
+
     // Range query for the journal view. Returns events between
     // [from, to) in chronological order so reconstructing "what I did
     // on May 10" is one scan, not a join.

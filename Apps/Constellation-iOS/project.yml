@@ -52,6 +52,16 @@ targets:
             LSHandlerRank: Owner
             LSItemContentTypes:
               - com.constellation.snapshot
+        # Local-network sync (MultipeerConnectivity). Apple Personal
+        # Team can't provision iCloud, so cross-device sync goes over
+        # Bonjour/MC instead — see PeerSync.swift. Both _tcp and _udp
+        # service entries are required for MC to even attempt discovery
+        # on iOS 14+. The service-type string must match between peers
+        # and be 1–15 chars; "constln-sync" keeps under that bound.
+        NSLocalNetworkUsageDescription: "Constellation syncs your skill graph between your own iPhone and iPad over your local WiFi."
+        NSBonjourServices:
+          - _constln-sync._tcp
+          - _constln-sync._udp
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.constellation.ios

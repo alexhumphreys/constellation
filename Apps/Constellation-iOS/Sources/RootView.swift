@@ -50,6 +50,17 @@ struct RootView: View {
             }
         }
         .task(id: reloadToken) { await reload() }
+        // Every local mutation bumps reloadToken — piggyback on that to
+        // queue a peer push. PeerSync internally debounces so drag-to-
+        // move's per-frame bumps collapse to one network send.
+        .onChange(of: reloadToken) { _, _ in
+            context.peerSync.kick()
+        }
+        // A successful inbound merge bumps pullCount; refresh the UI so
+        // peer changes appear without the user pulling-to-refresh.
+        .onChange(of: context.peerSync.pullCount) { _, _ in
+            reloadToken &+= 1
+        }
         // Navigating to (or closing) any skill other than the trace
         // source invalidates the overlay — a chain stranded next to an
         // unrelated inspector is just visual noise.
@@ -135,7 +146,8 @@ struct RootView: View {
                 skillCount: visibleSkills.count,
                 onAdd: { showAddSheet = true },
                 onShare: { Task { await prepareExport() } },
-                onEdit: { editingArea = $0 }
+                onEdit: { editingArea = $0 },
+                syncStatus: context.peerSync.status
             )
             .padding(.top, 12)
             .padding(.leading, 16)
@@ -181,7 +193,8 @@ struct RootView: View {
                 skillCount: visibleSkills.count,
                 onAdd: { showAddSheet = true },
                 onShare: { Task { await prepareExport() } },
-                onEdit: { editingArea = $0 }
+                onEdit: { editingArea = $0 },
+                syncStatus: context.peerSync.status
             )
             .padding(.top, 12)
             .padding(.leading, 12)

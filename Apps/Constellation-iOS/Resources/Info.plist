@@ -37,6 +37,13 @@
 	<string>1</string>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_constln-sync._tcp</string>
+		<string>_constln-sync._udp</string>
+	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Constellation syncs your skill graph between your own iPhone and iPad over your local WiFi.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

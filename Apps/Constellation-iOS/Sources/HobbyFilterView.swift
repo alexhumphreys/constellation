@@ -17,6 +17,7 @@ struct HobbyFilterView: View {
     // rather than presenting the sheet from here so the parent owns
     // sheet state alongside the other top-level sheets.
     let onEdit: (Area) -> Void
+    let syncStatus: PeerSync.Status
 
     @Environment(\.horizontalSizeClass) private var sizeClass
 
@@ -27,6 +28,7 @@ struct HobbyFilterView: View {
                     .font(.system(size: 9, weight: .semibold, design: .monospaced))
                     .tracking(2)
                     .foregroundStyle(.white.opacity(0.4))
+                SyncPill(status: syncStatus)
                 Spacer(minLength: 8)
                 Button(action: onShare) {
                     Image(systemName: "square.and.arrow.up")
@@ -84,6 +86,79 @@ struct HobbyFilterView: View {
         } else {
             active.insert(id)
         }
+    }
+}
+
+// Compact peer-sync indicator. Kept terse on purpose — it sits next to
+// MY SKY and shouldn't crowd the title. Tappable target deferred until
+// we know we want a settings sheet; for now it's pure status. Pill
+// switches between "SEARCHING", "PAIRED N", and "SYNCED N · 5s" so the
+// user can tell at a glance whether the other device is reachable.
+private struct SyncPill: View {
+    let status: PeerSync.Status
+    // TimelineView so "SYNCED · 2m" ticks forward without RootView
+    // having to bump state every minute. 30s schedule is finer than the
+    // labels need but cheap enough.
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 30)) { _ in
+            HStack(spacing: 4) {
+                Image(systemName: icon)
+                    .font(.system(size: 9, weight: .semibold))
+                Text(label)
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .tracking(1)
+            }
+            .foregroundStyle(tint)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(
+                Capsule().stroke(tint.opacity(0.35), lineWidth: 1)
+            )
+        }
+    }
+
+    private var icon: String {
+        switch status {
+        case .off:                  return "wifi.slash"
+        case .idle, .searching:     return "magnifyingglass"
+        case .connected:            return "personalhotspot"
+        case .synced:               return "checkmark.circle"
+        case .error:                return "exclamationmark.triangle"
+        }
+    }
+
+    private var tint: Color {
+        switch status {
+        case .off:                  return .white.opacity(0.35)
+        case .idle, .searching:     return .white.opacity(0.55)
+        case .connected:            return .white.opacity(0.75)
+        case .synced:               return Theme.Sky.star.opacity(0.9)
+        case .error:                return .red.opacity(0.85)
+        }
+    }
+
+    private var label: String {
+        switch status {
+        case .off:                          return "OFF"
+        case .idle:                         return "IDLE"
+        case .searching:                    return "SEARCHING"
+        case .connected(let n):             return "PAIRED \(n)"
+        case .synced(let at, let n):        return "SYNCED \(n) \(Self.relative(at))"
+        case .error:                        return "ERROR"
+        }
+    }
+
+    // Compact relative-time formatter. Avoids RelativeDateTimeFormatter's
+    // verbose "2 minutes ago" wording — at 9pt we need single-token
+    // labels ("2m", "5s", "1h") so the pill stays narrow.
+    private static func relative(_ date: Date) -> String {
+        let secs = max(0, Int(-date.timeIntervalSinceNow))
+        if secs < 5 { return "NOW" }
+        if secs < 60 { return "\(secs)S" }
+        let mins = secs / 60
+        if mins < 60 { return "\(mins)M" }
+        let hours = mins / 60
+        return "\(hours)H"
     }
 }
 

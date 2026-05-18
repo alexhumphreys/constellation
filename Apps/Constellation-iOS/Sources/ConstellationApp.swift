@@ -27,6 +27,11 @@ struct ConstellationApp: App {
             let ctx = try AppContext()
             try await ctx.seedIfEmpty()
             context = ctx
+            // Start MultipeerConnectivity sync after seed. First touch
+            // triggers iOS's local-network permission prompt; until the
+            // user grants it, MC silently fails to discover peers and
+            // the sync pill stays in `SEARCHING`.
+            ctx.startPeerSync()
         } catch {
             loadError = String(describing: error)
         }
