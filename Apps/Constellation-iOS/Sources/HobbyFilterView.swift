@@ -17,6 +17,7 @@ struct HobbyFilterView: View {
     // rather than presenting the sheet from here so the parent owns
     // sheet state alongside the other top-level sheets.
     let onEdit: (Area) -> Void
+    let onSearch: () -> Void
     let syncStatus: PeerSync.Status
     let onSyncTap: () -> Void
 
@@ -35,6 +36,13 @@ struct HobbyFilterView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Sync settings")
                 Spacer(minLength: 8)
+                Button(action: onSearch) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.75))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Search skills")
                 Button(action: onShare) {
                     Image(systemName: "square.and.arrow.up")
                         .font(.system(size: 16, weight: .medium))

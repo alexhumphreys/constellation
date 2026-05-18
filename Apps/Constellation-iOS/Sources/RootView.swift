@@ -41,6 +41,10 @@ struct RootView: View {
     // Sync settings sheet (paired devices + add-device CTA), reached
     // by tapping the sync pill.
     @State private var showSyncSheet: Bool = false
+    // Keyboard-first lookup overlay reached from the search icon in
+    // HobbyFilterView's header. Picking a result goes through the same
+    // focus pathway as a freshly-added skill.
+    @State private var showSearchSheet: Bool = false
 
     @Environment(\.horizontalSizeClass) private var sizeClass
 
@@ -122,6 +126,14 @@ struct RootView: View {
                 onClose: { showSyncSheet = false }
             )
         }
+        .sheet(isPresented: $showSearchSheet) {
+            SearchSheet(
+                skills: skills,
+                areas: areas,
+                onClose: { showSearchSheet = false },
+                onPick: focusOnSearchResult
+            )
+        }
         .sheet(isPresented: Binding(
             get: { editingArea != nil },
             set: { if !$0 { editingArea = nil } }
@@ -156,6 +168,7 @@ struct RootView: View {
                 onAdd: { showAddSheet = true },
                 onShare: { Task { await prepareExport() } },
                 onEdit: { editingArea = $0 },
+                onSearch: { showSearchSheet = true },
                 syncStatus: context.peerSync.status,
                 onSyncTap: { showSyncSheet = true }
             )
@@ -204,6 +217,7 @@ struct RootView: View {
                 onAdd: { showAddSheet = true },
                 onShare: { Task { await prepareExport() } },
                 onEdit: { editingArea = $0 },
+                onSearch: { showSearchSheet = true },
                 syncStatus: context.peerSync.status,
                 onSyncTap: { showSyncSheet = true }
             )
@@ -315,6 +329,17 @@ struct RootView: View {
     private func handleAddCompleted(areaId: AreaID, skillId: SkillID?) {
         activeHobbies.insert(areaId)
         reloadToken &+= 1
+    }
+
+    // Search sheet picked a skill: make sure its hobby is on (otherwise
+    // the star is filtered out and the focus pan lands on empty space),
+    // queue the focus animation, and open the inspector. Same pathway
+    // used by AddSheet for freshly-added skills, minus the reload bump
+    // (search doesn't mutate state).
+    private func focusOnSearchResult(_ skill: Skill) {
+        activeHobbies.insert(skill.areaId)
+        pendingFocusSkillId = skill.id
+        selectedSkillId = skill.id
     }
 
     private var visibleSkills: [Skill] {
