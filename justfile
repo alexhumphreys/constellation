@@ -40,6 +40,15 @@ demo:
 # `ios-build` and `ios-launch` build for the iPhone simulator; pass a
 # different name via `ios-sim=...`. First device install needs the
 # device plugged in and trusted (Settings > VPN & Device Management).
+#
+# NOTE: `ios-gen` is intentionally NOT a dep of the build/launch/device
+# recipes. Each regen rewrites project.pbxproj, which resets Xcode's
+# Signing & Capabilities UI back to the raw team identifier — meaning
+# you'd have to re-click "Alex Humphreys (Personal Team)" in the team
+# dropdown every CLI build. Run `just ios-gen` manually after adding,
+# removing, or renaming a source file (or after pulling new files);
+# Xcode will pick up the change next time you open the project. Between
+# regens the xcodeproj is stable and your team selection persists.
 
 ios-sim := "iPhone 17"
 ios-pad-sim := "iPad Pro 13-inch (M4)"
@@ -47,7 +56,7 @@ ios-pad-sim := "iPad Pro 13-inch (M4)"
 ios-gen:
     cd Apps/Constellation-iOS && xcodegen generate
 
-ios-build: ios-gen
+ios-build:
     xcodebuild \
       -project Apps/Constellation-iOS/Constellation-iOS.xcodeproj \
       -scheme Constellation-iOS \
@@ -94,7 +103,7 @@ ipad-launch: ios-build
 ios-devices:
     xcrun devicectl list devices
 
-ios-device udid=env_var_or_default("IOS_DEVICE_ID", ""): ios-gen
+ios-device udid=env_var_or_default("IOS_DEVICE_ID", ""):
     #!/usr/bin/env bash
     set -euo pipefail
     UDID="{{udid}}"
