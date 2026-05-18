@@ -72,13 +72,13 @@ struct CanvasGestureSurface: UIViewRepresentable {
             target: context.coordinator,
             action: #selector(Coordinator.handleLongPress(_:))
         )
-        // 0.4s feels snappier than the 0.5s default without competing
-        // with the "hold to inspect" muscle memory iOS users have. The
-        // finger has to stay roughly still for those 0.4s, which is
-        // what gives us free non-interference with pan (pan needs
-        // movement, long-press needs stillness — they don't both fire
-        // for the same touch sequence).
-        longPress.minimumPressDuration = 0.4
+        // 0.28s is short enough to feel like a direct grab but still
+        // safely above the threshold where casual taps accidentally
+        // promote to drags (iOS's own UICollectionView reorder uses
+        // ~0.5s; we tolerate going shorter because pan needs >0pt
+        // movement and our taps land within ~120ms, so the windows
+        // don't overlap meaningfully).
+        longPress.minimumPressDuration = 0.28
         longPress.delegate = context.coordinator
         view.addGestureRecognizer(longPress)
         context.coordinator.longPress = longPress
