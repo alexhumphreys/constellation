@@ -177,10 +177,17 @@ struct EditSkillSheet: View {
                    let dest = areas.first(where: { $0.id == areaId })
                 {
                     updated.areaId = areaId
-                    let neighbours = try await store.skills()
+                    // Drop at the destination's current cluster center
+                    // (centroid of its live skills) rather than the
+                    // stored centerX/centerY — keeps the moved star with
+                    // its new family even when the user has dragged the
+                    // destination hobby elsewhere.
+                    let allSkills = try await store.skills()
+                    let (cx, cy) = dest.liveCenter(in: allSkills)
+                    let neighbours = allSkills
                         .filter { $0.areaId == areaId && !$0.isDeleted && $0.id != skill.id }
                     let (x, y) = openSpot(
-                        near: dest.centerX, near: dest.centerY,
+                        near: cx, near: cy,
                         avoiding: neighbours
                     )
                     updated.x = x

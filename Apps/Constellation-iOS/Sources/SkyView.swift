@@ -476,8 +476,15 @@ struct SkyView: View {
             (size.height * 0.85) / bboxH
         )
         let s = Swift.max(CGFloat(0.60), fitScale).zoomClamped(to: zoomBounds)
-        let centerX = area?.centerX ?? (xs.reduce(0, +) / Double(xs.count))
-        let centerY = area?.centerY ?? (ys.reduce(0, +) / Double(ys.count))
+        // Centroid of the live cluster — `Area.liveCenter` falls back
+        // to the stored centerX/centerY when the area has no skills,
+        // but the early-return above means we always have at least one
+        // here, so this is effectively the rolling cluster center.
+        let center = area?.liveCenter(in: skills)
+            ?? (x: xs.reduce(0, +) / Double(xs.count),
+                y: ys.reduce(0, +) / Double(ys.count))
+        let centerX = center.x
+        let centerY = center.y
         scale = s
         offset = CGSize(
             width: size.width / 2 - centerX * s,

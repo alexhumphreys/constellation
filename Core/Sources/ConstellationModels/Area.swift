@@ -41,6 +41,22 @@ public struct Area: Hashable, Sendable, Codable {
 
     public var isDeleted: Bool { tombstonedAt != nil }
 
+    // Where this hobby currently "lives" in the sky — the centroid of
+    // its live (non-tombstoned) skills, falling back to the stored
+    // centerX/centerY when the area has no skills yet. Callers that
+    // want a stable anchor (new-skill drop spot, focus pan target) use
+    // this instead of the raw stored fields so the anchor follows the
+    // cluster as the user drags skills around. Pass the full skill
+    // list; filtering by areaId happens here.
+    public func liveCenter(in skills: [Skill]) -> (x: Double, y: Double) {
+        let live = skills.filter { $0.areaId == id && !$0.isDeleted }
+        guard !live.isEmpty else { return (centerX, centerY) }
+        let n = Double(live.count)
+        let cx = live.reduce(0.0) { $0 + $1.x } / n
+        let cy = live.reduce(0.0) { $0 + $1.y } / n
+        return (cx, cy)
+    }
+
     // Lowercase the hex and prepend "#" if the caller passed it bare.
     // Returns the input unchanged if it doesn't look like hex — the model
     // doesn't reject bad colors, it just normalizes the shape it understands.

@@ -201,8 +201,14 @@ struct AddSheet: View {
         // exact center pixel and the user only ever sees the topmost.
         // First add still lands at center; subsequent ones spiral out
         // into the first slot that's clear of existing stars.
-        let areaSkills = try await store.skills().filter { $0.areaId == areaId && !$0.isDeleted }
-        let (x, y) = openSpot(near: area.centerX, near: area.centerY, avoiding: areaSkills)
+        // Centre tracks the current cluster (centroid of live skills)
+        // rather than the area's stored centerX/centerY, so dragging the
+        // hobby across the sky doesn't leave new stars stranded at the
+        // old logical center.
+        let allSkills = try await store.skills()
+        let (cx, cy) = area.liveCenter(in: allSkills)
+        let areaSkills = allSkills.filter { $0.areaId == areaId && !$0.isDeleted }
+        let (x, y) = openSpot(near: cx, near: cy, avoiding: areaSkills)
         let skill = Skill(
             id: sid,
             areaId: areaId,

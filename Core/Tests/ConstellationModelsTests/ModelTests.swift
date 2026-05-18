@@ -44,6 +44,32 @@ struct ModelTests {
         #expect(na.id != nb.id)
     }
 
+    @Test("Area.liveCenter centroids live skills, falls back to stored center when empty")
+    func areaLiveCenter() {
+        let area = Area(id: AreaID("silks"), name: "Silks",
+                        centerX: 100, centerY: 200)
+        // No skills → fallback to stored center.
+        #expect(area.liveCenter(in: []) == (100, 200))
+        let s1 = Skill(id: SkillID("a"), areaId: AreaID("silks"),
+                       name: "A", x: 300, y: 400)
+        let s2 = Skill(id: SkillID("b"), areaId: AreaID("silks"),
+                       name: "B", x: 500, y: 600)
+        // Two live skills → centroid.
+        let c = area.liveCenter(in: [s1, s2])
+        #expect(c.x == 400 && c.y == 500)
+        // Tombstoned skills are excluded.
+        var s3 = Skill(id: SkillID("c"), areaId: AreaID("silks"),
+                       name: "C", x: 9999, y: 9999)
+        s3.tombstonedAt = Date()
+        let c2 = area.liveCenter(in: [s1, s2, s3])
+        #expect(c2.x == 400 && c2.y == 500)
+        // Skills from other areas don't count.
+        let s4 = Skill(id: SkillID("d"), areaId: AreaID("other"),
+                       name: "D", x: 9999, y: 9999)
+        let c3 = area.liveCenter(in: [s1, s2, s4])
+        #expect(c3.x == 400 && c3.y == 500)
+    }
+
     @Test("Codable round-trip preserves all fields")
     func codableRoundtrip() throws {
         let skill = Skill(
