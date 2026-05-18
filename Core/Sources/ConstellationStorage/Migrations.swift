@@ -76,6 +76,15 @@ enum Migrations {
             )
         }
 
+        // Skills gained an `aliases` JSON column so search can match
+        // alternate names without splitting equivalent moves across
+        // separate rows. Existing rows backfill to the empty array.
+        m.registerMigration("v4_skill_aliases") { db in
+            try db.alter(table: "skills") { t in
+                t.add(column: "aliases", .text).notNull().defaults(to: "[]")
+            }
+        }
+
         return m
     }
 

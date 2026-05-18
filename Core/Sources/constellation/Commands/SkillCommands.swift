@@ -8,7 +8,7 @@ struct SkillCommands: AsyncParsableCommand {
         abstract: "Add, list, and update skills (stars in the constellation).",
         subcommands: [
             Add.self, List.self, Show.self, Status.self,
-            Prereqs.self, Move.self, Delete.self,
+            Prereqs.self, Aliases.self, Move.self, Delete.self,
         ]
     )
 
@@ -34,6 +34,10 @@ struct SkillCommands: AsyncParsableCommand {
                 help: "Soft (recommended) prereq skill IDs.")
         var soft: [String] = []
 
+        @Option(name: .long, parsing: .upToNextOption,
+                help: "Alternate names this skill is also known by.")
+        var alias: [String] = []
+
         @Option(name: .long, help: "Virtual-sky x position.")
         var x: Double = 0
 
@@ -53,7 +57,8 @@ struct SkillCommands: AsyncParsableCommand {
                 x: x, y: y,
                 prereqIds: prereqs.map(SkillID.init),
                 softPrereqIds: soft.map(SkillID.init),
-                isFoundation: foundation
+                isFoundation: foundation,
+                aliases: alias
             )
             try await ctx.store.upsertSkill(skill)
             print("added skill \(id) (\(name)) → \(area), status=\(status.rawValue)")
@@ -113,6 +118,9 @@ struct SkillCommands: AsyncParsableCommand {
             print("  area:   \(skill.areaId.rawValue)")
             print("  status: \(skill.status.rawValue)  [\(skill.status.displayLabel)]")
             print("  pos:    (\(skill.x), \(skill.y))")
+            if !skill.aliases.isEmpty {
+                print("  a.k.a.  \(skill.aliases.joined(separator: ", "))")
+            }
             if skill.isFoundation { print("  ★ foundation") }
             if !skill.helpsAreas.isEmpty {
                 print("  helps:  \(skill.helpsAreas.map(\.rawValue).joined(separator: ", "))")
@@ -195,6 +203,31 @@ struct SkillCommands: AsyncParsableCommand {
             skill.updatedAt = Date()
             try await ctx.store.upsertSkill(skill)
             print("\(id) prereqs → \(prereqs.joined(separator: ", "))")
+        }
+    }
+
+    struct Aliases: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Replace the aliases list for a skill (alternate names search will match)."
+        )
+
+        @Argument var id: String
+        @Argument(parsing: .remaining, help: "Alternate names; pass none to clear.")
+        var aliases: [String]
+
+        func run() async throws {
+            let ctx = try await AppContext.standard()
+            guard var skill = try await ctx.store.skill(SkillID(id)) else {
+                throw ValidationError("no skill '\(id)'")
+            }
+            skill.aliases = aliases
+            skill.updatedAt = Date()
+            try await ctx.store.upsertSkill(skill)
+            if aliases.isEmpty {
+                print("\(id) aliases cleared")
+            } else {
+                print("\(id) aliases → \(aliases.joined(separator: ", "))")
+            }
         }
     }
 

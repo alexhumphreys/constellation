@@ -65,6 +65,7 @@ struct SkillRow: Codable, FetchableRecord, PersistableRecord {
     var prereqIds: String       // JSON-encoded [String]
     var softPrereqIds: String   // JSON-encoded [String]
     var helpsAreas: String      // JSON-encoded [String]
+    var aliases: String         // JSON-encoded [String]
     var isFoundation: Bool
     var updatedAt: Date
     var tombstonedAt: Date?
@@ -79,6 +80,7 @@ struct SkillRow: Codable, FetchableRecord, PersistableRecord {
         self.prereqIds = encodeIds(skill.prereqIds.map(\.rawValue))
         self.softPrereqIds = encodeIds(skill.softPrereqIds.map(\.rawValue))
         self.helpsAreas = encodeIds(skill.helpsAreas.map(\.rawValue))
+        self.aliases = encodeIds(skill.aliases)
         self.isFoundation = skill.isFoundation
         self.updatedAt = skill.updatedAt
         self.tombstonedAt = skill.tombstonedAt
@@ -96,6 +98,7 @@ struct SkillRow: Codable, FetchableRecord, PersistableRecord {
             softPrereqIds: decodeIds(softPrereqIds).map(SkillID.init),
             isFoundation: isFoundation,
             helpsAreas: decodeIds(helpsAreas).map(AreaID.init),
+            aliases: decodeIds(aliases),
             updatedAt: updatedAt,
             tombstonedAt: tombstonedAt
         )

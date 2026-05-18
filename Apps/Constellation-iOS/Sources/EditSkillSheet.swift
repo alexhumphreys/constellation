@@ -19,6 +19,8 @@ struct EditSkillSheet: View {
     @State private var name: String
     @State private var areaId: AreaID
     @State private var isFoundation: Bool
+    @State private var aliases: [String]
+    @State private var draftAlias: String = ""
 
     @State private var saving: Bool = false
     @State private var showDeleteConfirm: Bool = false
@@ -41,6 +43,7 @@ struct EditSkillSheet: View {
         _name = State(initialValue: skill.name)
         _areaId = State(initialValue: skill.areaId)
         _isFoundation = State(initialValue: skill.isFoundation)
+        _aliases = State(initialValue: skill.aliases)
     }
 
     var body: some View {
@@ -68,6 +71,33 @@ struct EditSkillSheet: View {
                     Toggle("Foundation skill", isOn: $isFoundation)
                 } footer: {
                     Text("Foundation skills are entry points — drawn with a star marker.")
+                        .font(.caption2)
+                }
+                Section {
+                    ForEach(aliases, id: \.self) { alias in
+                        HStack {
+                            Text(alias)
+                            Spacer()
+                            Button(role: .destructive) {
+                                aliases.removeAll { $0 == alias }
+                            } label: {
+                                Image(systemName: "minus.circle.fill")
+                                    .foregroundStyle(.red.opacity(0.7))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    HStack {
+                        TextField("Add another name…", text: $draftAlias)
+                            .submitLabel(.done)
+                            .onSubmit(addDraftAlias)
+                        Button("Add", action: addDraftAlias)
+                            .disabled(draftAlias.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                } header: {
+                    Text("Also known as")
+                } footer: {
+                    Text("Alternate names this skill is known by — search will match any of them.")
                         .font(.caption2)
                 }
                 Section {
@@ -122,6 +152,18 @@ struct EditSkillSheet: View {
         return !trimmed.isEmpty
     }
 
+    // Trim + dedupe (case-insensitive) so the alias list can't grow
+    // duplicates and won't carry trailing whitespace into LWW sync.
+    private func addDraftAlias() {
+        let trimmed = draftAlias.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let existing = aliases.map { $0.lowercased() }
+        if !existing.contains(trimmed.lowercased()) {
+            aliases.append(trimmed)
+        }
+        draftAlias = ""
+    }
+
     private func save() {
         saving = true
         errorMessage = nil
@@ -130,6 +172,7 @@ struct EditSkillSheet: View {
                 var updated = skill
                 updated.name = name.trimmingCharacters(in: .whitespacesAndNewlines)
                 updated.isFoundation = isFoundation
+                updated.aliases = aliases
                 if areaId != skill.areaId,
                    let dest = areas.first(where: { $0.id == areaId })
                 {

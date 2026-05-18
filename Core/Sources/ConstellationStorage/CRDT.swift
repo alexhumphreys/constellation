@@ -115,10 +115,12 @@ public enum CRDT {
 public struct ConstellationSnapshot: Codable, Sendable, Hashable {
     // v1 → v2: Clip.source split into platform + handle.
     // v2 → v3: Clip gained an `updatedAt` clock so it can be edited via
-    // LWW merge. Both bumps break Codable round-trip with the previous
-    // version — v0.1 has no real data in the wild, so we reject older
-    // snapshots loudly rather than silently filling in defaults.
-    public static let currentSchemaVersion: Int = 3
+    // LWW merge.
+    // v3 → v4: Skill gained `aliases: [String]` so alternate names can
+    // ride through sync. Both devices must be on the same build for
+    // pairing — we reject mismatched versions loudly rather than
+    // silently filling in defaults.
+    public static let currentSchemaVersion: Int = 4
 
     public var schemaVersion: Int
     public var generatedAt: Date

@@ -53,7 +53,8 @@ struct ModelTests {
             prereqIds: [SkillID("hip-key"), SkillID("gazelle")],
             softPrereqIds: [SkillID("invert")],
             isFoundation: false,
-            helpsAreas: [AreaID("cali")]
+            helpsAreas: [AreaID("cali")],
+            aliases: ["Hook", "Croché"]
         )
         let data = try JSONEncoder().encode(skill)
         let decoded = try JSONDecoder().decode(Skill.self, from: data)

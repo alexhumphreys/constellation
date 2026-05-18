@@ -20,6 +20,10 @@ public struct Skill: Hashable, Sendable, Codable {
     // Kept as freeform area IDs so the constellation can show provenance
     // labels without modelling explicit cross-graph edges.
     public var helpsAreas: [AreaID]
+    // Alternate names the same move is known by ("crossback straddle" vs
+    // "split-out straddle"). Surfaced in search so vocabulary differences
+    // don't fragment matches; rendered as a sub-line in the inspector.
+    public var aliases: [String]
     public var updatedAt: Date
     public var tombstonedAt: Date?
 
@@ -34,6 +38,7 @@ public struct Skill: Hashable, Sendable, Codable {
         softPrereqIds: [SkillID] = [],
         isFoundation: Bool = false,
         helpsAreas: [AreaID] = [],
+        aliases: [String] = [],
         updatedAt: Date = Date(),
         tombstonedAt: Date? = nil
     ) {
@@ -47,6 +52,7 @@ public struct Skill: Hashable, Sendable, Codable {
         self.softPrereqIds = softPrereqIds
         self.isFoundation = isFoundation
         self.helpsAreas = helpsAreas
+        self.aliases = aliases
         self.updatedAt = updatedAt
         self.tombstonedAt = tombstonedAt
     }

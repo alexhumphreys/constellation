@@ -18,7 +18,8 @@ struct StoreTests {
             x: 740, y: 680,
             prereqIds: [SkillID("invert")],
             softPrereqIds: [SkillID("climb")],
-            isFoundation: false
+            isFoundation: false,
+            aliases: ["Egyptian", "Hipkey"]
         )
         try await store.upsertSkill(skill)
 
@@ -27,6 +28,7 @@ struct StoreTests {
         #expect(fetched?.status == .drill)
         #expect(fetched?.prereqIds == [SkillID("invert")])
         #expect(fetched?.softPrereqIds == [SkillID("climb")])
+        #expect(fetched?.aliases == ["Egyptian", "Hipkey"])
     }
 
     @Test("setStatus updates the row and bumps updatedAt")

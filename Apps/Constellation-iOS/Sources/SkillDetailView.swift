@@ -240,6 +240,11 @@ struct SkillDetailView: View {
             Text(skill.name)
                 .font(.system(size: 30, weight: .regular, design: .serif))
                 .foregroundStyle(Theme.Sky.star)
+            if !skill.aliases.isEmpty {
+                Text("a.k.a. \(skill.aliases.joined(separator: " · "))")
+                    .font(.system(size: 13, design: .serif))
+                    .foregroundStyle(.white.opacity(0.55))
+            }
         }
     }
 
