@@ -27,14 +27,19 @@ import os
 // - Both devices must have the app running (foreground, or backgrounded
 //   briefly before iOS suspends MC). Edits made while one device is
 //   completely off the air get pushed at next meeting.
-// - No pairing: anyone on the same WiFi running the app would see and
-//   merge with you. Acceptable for a niche personal app on a trusted
-//   home network; flagged in project_next_steps as a future polish
-//   (per-install pairing token in MCNearbyServiceAdvertiser discovery
-//   info).
 // - No transport encryption is enforced at the protocol level, but
 //   MCSession is created with encryptionPreference: .required which
 //   does TLS between peers via auto-negotiated certs.
+//
+// Pairing (v2 — current code):
+// Each install carries a UUID `pairId` stored in UserDefaults (see
+// PeerTrust). The advertiser ships this id in `discoveryInfo["pid"]`
+// so the browser side can filter at discovery time; nothing from an
+// untrusted install ever crosses the wire. The browser also passes
+// its own pid in the invitation context so the advertiser side can
+// independently verify trust before accepting — defense in depth, in
+// case the discovery-side check is bypassed by an attacker reaching
+// the invitation API directly.
 
 // MC types are NSObject subclasses that aren't marked Sendable but are
 // effectively safe to ferry across actors — Apple's framework already
@@ -45,6 +50,13 @@ extension MCPeerID: @retroactive @unchecked Sendable {}
 extension MCSession: @retroactive @unchecked Sendable {}
 extension MCNearbyServiceBrowser: @retroactive @unchecked Sendable {}
 extension MCNearbyServiceAdvertiser: @retroactive @unchecked Sendable {}
+
+// Wraps MC's @escaping (Bool, MCSession?) -> Void invitation handler so
+// we can ferry it into a MainActor Task. MC fires this exactly once;
+// the wrapper is single-use and dies with the surrounding scope.
+private struct InvitationResponder: @unchecked Sendable {
+    let respond: (Bool, MCSession?) -> Void
+}
 
 @MainActor
 @Observable
@@ -64,6 +76,10 @@ final class PeerSync: NSObject {
     // canvas re-reads the store. Counter, not Bool, so two pulls in
     // quick succession both register.
     var pullCount: Int = 0
+    // Bumps on every successful pair add — used by the showing side's
+    // PairSheet to auto-dismiss when the scanning peer claims our QR.
+    // Same counter pattern as pullCount.
+    var pairCount: Int = 0
 
     // Service type: 1–15 chars, lowercase + dash. Must match between
     // peers. Bonjour translates this to `_constln-sync._tcp/udp`,
@@ -93,6 +109,35 @@ final class PeerSync: NSObject {
     // A sends merged… CRDT guarantees convergence but a tight loop
     // burns battery.
     @ObservationIgnored private var lastSentHash: String?
+
+    // Scan-and-claim pairing state.
+    //
+    // Show side: when PairSheet's Show tab is up, `inviteToken` holds a
+    // freshly-generated one-shot UUID embedded in the QR. An invitation
+    // arriving with this token attached is treated as proof that the
+    // sender actually saw our QR, and the sender's pid gets added to
+    // our trust list right then. Cleared on consumption or PairSheet
+    // close — replay-safe because a leaked QR can't be exchanged for
+    // trust once the token is gone.
+    @ObservationIgnored private var inviteToken: String?
+    @ObservationIgnored private var inviteTokenExpiry: Date?
+
+    // Every peerID we've seen via Bonjour, keyed by their pid. Populated
+    // even when the trust gate rejects them — scan-and-claim needs to
+    // invitePeer on an untrusted peerID once the user scans its QR.
+    @ObservationIgnored private var discoveredPeers: [String: MCPeerID] = [:]
+
+    // Scan side: if the user scans a QR before our browser's foundPeer
+    // has fired for that peer, we can't invite yet. Stash the claim and
+    // complete it from foundPeer.
+    @ObservationIgnored private var pendingClaim: PendingClaim?
+
+    private struct PendingClaim {
+        let pid: String
+        let name: String
+        let token: String
+        let queuedAt: Date
+    }
 
     // Nonisolated mirror of `session` so the advertiser's invitation
     // handler can read it without a main-actor hop (MC docs ask for
@@ -128,7 +173,9 @@ final class PeerSync: NSObject {
         self.sessionForDelegates = session
 
         let advertiser = MCNearbyServiceAdvertiser(
-            peer: myPeerId, discoveryInfo: nil, serviceType: serviceType
+            peer: myPeerId,
+            discoveryInfo: ["pid": PeerTrust.myPairId],
+            serviceType: serviceType
         )
         advertiser.delegate = self
         advertiser.startAdvertisingPeer()
@@ -140,10 +187,192 @@ final class PeerSync: NSObject {
         self.browser = browser
 
         status = .searching
-        Self.logger.info(
-            "started peer sync as \(self.myPeerId.displayName, privacy: .public)"
-        )
+        Task { [weak self] in
+            try? await self?.store?.emit(WideEvent(
+                op: "peer.sync.start",
+                outcome: .ok,
+                fields: [
+                    "display_name": .string(self?.myPeerId.displayName ?? ""),
+                    "trusted_count": .int(Int64(PeerTrust.trustedPeers().count)),
+                ]
+            ))
+        }
     }
+
+    // MARK: - Pairing
+
+    // Show side: generate the one-shot token embedded in our QR. Valid
+    // until cleared or until the expiry (5 minutes — long enough for a
+    // user to walk between devices, short enough that an abandoned QR
+    // photographed off a screen can't be replayed days later).
+    func makeInviteToken() -> String {
+        let token = UUID().uuidString
+        inviteToken = token
+        inviteTokenExpiry = Date().addingTimeInterval(300)
+        return token
+    }
+
+    func clearInviteToken() {
+        inviteToken = nil
+        inviteTokenExpiry = nil
+    }
+
+    // Scan side: the user just scanned a peer's QR. Add the peer to our
+    // trust list, then invite that peerID over MC with the token they
+    // gave us so the other side knows we're the one who scanned. If we
+    // haven't seen the peer via Bonjour yet, stash the claim and let
+    // foundPeer complete it when discovery catches up.
+    func claimPairing(remotePid: String, remoteName: String, remoteToken: String) {
+        // Mirror the add on our side. The remote will add us on theirs
+        // when our invitation arrives carrying their token.
+        let now = Date()
+        let peer = TrustedPeer(
+            pairId: remotePid,
+            displayName: remoteName.isEmpty ? "Unknown device" : remoteName,
+            addedAt: now,
+            lastSeen: now
+        )
+        PeerTrust.add(peer)
+        pairCount &+= 1
+        Task { [weak self] in
+            try? await self?.store?.emit(WideEvent(
+                op: "peer.pair.add",
+                outcome: .ok,
+                fields: [
+                    "peer_name": .string(peer.displayName),
+                    "pid_prefix": .string(String(peer.pairId.prefix(8))),
+                    "trusted_count": .int(Int64(PeerTrust.trustedPeers().count)),
+                    "via": .string("scan"),
+                ]
+            ))
+        }
+        if let peerID = discoveredPeers[remotePid] {
+            sendClaimInvitation(to: peerID, token: remoteToken)
+        } else {
+            pendingClaim = PendingClaim(
+                pid: remotePid, name: peer.displayName,
+                token: remoteToken, queuedAt: now
+            )
+            // Force a discovery cycle so foundPeer fires for any already-
+            // visible peer matching this pid.
+            restartDiscovery()
+        }
+    }
+
+    private func sendClaimInvitation(to peerID: MCPeerID, token: String) {
+        guard let session = sessionForDelegates, let browser else { return }
+        guard let ctx = Self.encodeInvitation(
+            pid: PeerTrust.myPairId,
+            name: myPeerId.displayName,
+            token: token
+        ) else { return }
+        browser.invitePeer(peerID, to: session, withContext: ctx, timeout: 10)
+        let name = peerID.displayName
+        Task { [weak self] in
+            try? await self?.store?.emit(WideEvent(
+                op: "peer.invitation.sent",
+                outcome: .ok,
+                fields: [
+                    "peer_name": .string(name),
+                    "via": .string("claim"),
+                ]
+            ))
+        }
+    }
+
+    // Advertiser side: a token-bearing invitation just arrived from an
+    // untrusted peer. Verify it matches our currently-advertised token,
+    // and if so promote the sender to trust + accept.
+    fileprivate func consumeClaim(pid: String, name: String, token: String) -> Bool {
+        guard let current = inviteToken,
+              token == current,
+              let expiry = inviteTokenExpiry,
+              Date() < expiry
+        else { return false }
+        let now = Date()
+        let peer = TrustedPeer(
+            pairId: pid,
+            displayName: name.isEmpty ? "Unknown device" : name,
+            addedAt: now,
+            lastSeen: now
+        )
+        PeerTrust.add(peer)
+        clearInviteToken()
+        pairCount &+= 1
+        Task { [weak self] in
+            try? await self?.store?.emit(WideEvent(
+                op: "peer.pair.add",
+                outcome: .ok,
+                fields: [
+                    "peer_name": .string(peer.displayName),
+                    "pid_prefix": .string(String(peer.pairId.prefix(8))),
+                    "trusted_count": .int(Int64(PeerTrust.trustedPeers().count)),
+                    "via": .string("show"),
+                ]
+            ))
+        }
+        return true
+    }
+
+    // Drop a peer from trust and tear down any current session so we
+    // stop pushing snapshots to them. The session is shared across peers,
+    // so disconnecting drops every connection — restartDiscovery then
+    // re-invites the still-trusted ones. Acceptable churn for an event
+    // that fires once per unpair.
+    func removePairing(pairId: String) {
+        let peers = PeerTrust.trustedPeers()
+        let target = peers.first { $0.pairId == pairId }
+        PeerTrust.remove(pairId: pairId)
+        Task { [weak self] in
+            try? await self?.store?.emit(WideEvent(
+                op: "peer.pair.remove",
+                outcome: .ok,
+                fields: [
+                    "peer_name": .string(target?.displayName ?? ""),
+                    "pid_prefix": .string(String(pairId.prefix(8))),
+                    "trusted_count": .int(Int64(PeerTrust.trustedPeers().count)),
+                ]
+            ))
+        }
+        session?.disconnect()
+        restartDiscovery()
+    }
+
+    // Cycle the advertiser and browser. The Bonjour service drops + re-
+    // publishes (so peers re-discover us with the current discoveryInfo)
+    // and our own browser flushes its cached found-peer set (so the next
+    // foundPeer callback re-evaluates trust against the latest list).
+    func restartDiscovery() {
+        guard let advertiser, let browser else { return }
+        advertiser.stopAdvertisingPeer()
+        browser.stopBrowsingForPeers()
+        advertiser.startAdvertisingPeer()
+        browser.startBrowsingForPeers()
+        if status == .searching || status == .idle {
+            // Don't downgrade a connected/synced state — just nudge the
+            // pill so the user sees activity if they're watching.
+        } else if case .error = status {
+            status = .searching
+        }
+        Task { [weak self] in
+            try? await self?.store?.emit(WideEvent(
+                op: "peer.discovery.restart",
+                outcome: .ok,
+                fields: [
+                    "trusted_count": .int(Int64(PeerTrust.trustedPeers().count)),
+                ]
+            ))
+        }
+    }
+
+    // No periodic retry loop. MC's MCNearbyServiceBrowser wraps a
+    // CFNetServiceBrowser whose runloop sources don't survive rapid
+    // stop/start cycles — sustained restart-on-a-timer eventually trips
+    // _CFAssertMismatchedTypeID inside _BrowserCancel and crashes the
+    // app. Scan-and-claim already brings both sides into trust in one
+    // user action, so periodic retry isn't needed anyway: restart
+    // discovery only on user-triggered pair/unpair (and a fresh app
+    // launch starts MC clean).
 
     // Debounced push to currently-connected peers. Called from RootView
     // on every reloadToken bump (every local mutation). Repeated calls
@@ -290,6 +519,39 @@ final class PeerSync: NSObject {
         Date().timeIntervalSince(start) * 1000.0
     }
 
+    // MARK: - Invitation context
+
+    // Sent as `withContext:` on every browser → advertiser invitation.
+    // Two acceptance paths on the advertiser side:
+    //   1. `pid` is in our trust list (post-pairing reconnect — the
+    //      common case).
+    //   2. `token` matches our currently-advertised inviteToken (the
+    //      scan-and-claim path: the sender just scanned our QR and is
+    //      proving it by echoing our one-shot token). On accept, we
+    //      add `pid` to our trust list and consume the token.
+    //
+    // v=1: pid only (legacy; rejected by v=2 receivers because token
+    //      is missing and pid is unknown until paired).
+    // v=2: pid + name + optional token.
+    private struct InvitationContext: Codable {
+        var v: Int
+        var pid: String
+        var name: String?
+        var token: String?
+    }
+
+    nonisolated private static func encodeInvitation(
+        pid: String, name: String? = nil, token: String? = nil
+    ) -> Data? {
+        let ctx = InvitationContext(v: 2, pid: pid, name: name, token: token)
+        return try? JSONEncoder().encode(ctx)
+    }
+
+    nonisolated private static func decodeInvitation(_ data: Data?) -> InvitationContext? {
+        guard let data else { return nil }
+        return try? JSONDecoder().decode(InvitationContext.self, from: data)
+    }
+
     // Hash the snapshot's *content*, ignoring `generatedAt`. Each call
     // to Store.snapshot() bumps generatedAt to now, so without zeroing
     // it the hash would always differ and the dedupe would never fire.
@@ -407,10 +669,76 @@ extension PeerSync: MCNearbyServiceAdvertiserDelegate {
         withContext context: Data?,
         invitationHandler: @escaping (Bool, MCSession?) -> Void
     ) {
-        // Auto-accept — v1 trusts the local network. The invitation
-        // handler ideally fires synchronously; we read sessionForDelegates
-        // (a nonisolated mirror set on start()) to avoid an actor hop.
-        invitationHandler(true, sessionForDelegates)
+        // Two accept paths:
+        //   1. Sender's pid is already in our trust list (the common
+        //      post-pairing reconnect case).
+        //   2. Sender's invitation carries a token matching our current
+        //      one-shot inviteToken (the scan-and-claim path; sender
+        //      proves they saw our QR by echoing the token, and we
+        //      promote them to trust right here).
+        // Anything else gets rejected at the discovery layer's belt-
+        // and-braces sibling — nothing untrusted opens a session.
+        guard let ctx = Self.decodeInvitation(context) else {
+            invitationHandler(false, nil)
+            return
+        }
+        let displayName = peerID.displayName
+
+        if PeerTrust.isTrusted(ctx.pid) {
+            let pid = ctx.pid
+            Task.detached(priority: .background) {
+                PeerTrust.updateLastSeen(pairId: pid, displayName: displayName)
+            }
+            invitationHandler(true, sessionForDelegates)
+            return
+        }
+
+        if let token = ctx.token {
+            let pid = ctx.pid
+            let name = ctx.name ?? displayName
+            let sessionRef = sessionForDelegates
+            // MC's invitation handler is a plain (non-Sendable) closure;
+            // Swift 6 strict concurrency won't let us send it into a
+            // Task. Wrap once, mark @unchecked Sendable — MC itself is
+            // single-shot on this handler so the wrap is benign.
+            let responder = InvitationResponder(respond: invitationHandler)
+            Task { @MainActor [weak self] in
+                guard let self else {
+                    responder.respond(false, nil)
+                    return
+                }
+                if self.consumeClaim(pid: pid, name: name, token: token) {
+                    responder.respond(true, sessionRef)
+                } else {
+                    responder.respond(false, nil)
+                    try? await self.store?.emit(WideEvent(
+                        op: "peer.invitation.rejected",
+                        outcome: .skipped,
+                        fields: [
+                            "peer_name": .string(displayName),
+                            "pid_prefix": .string(String(pid.prefix(8))),
+                            "reason": .string("bad_token"),
+                        ]
+                    ))
+                }
+            }
+            return
+        }
+
+        // Neither path: reject and log.
+        let remotePidPrefix = String(ctx.pid.prefix(8))
+        invitationHandler(false, nil)
+        Task { @MainActor [weak self] in
+            try? await self?.store?.emit(WideEvent(
+                op: "peer.invitation.rejected",
+                outcome: .skipped,
+                fields: [
+                    "peer_name": .string(displayName),
+                    "pid_prefix": .string(remotePidPrefix),
+                    "reason": .string("untrusted"),
+                ]
+            ))
+        }
     }
 
     nonisolated func advertiser(
@@ -432,6 +760,44 @@ extension PeerSync: MCNearbyServiceBrowserDelegate {
         foundPeer peerID: MCPeerID,
         withDiscoveryInfo info: [String: String]?
     ) {
+        // Trust gate: every advertiser ships its pair id in
+        // discoveryInfo["pid"]. Discard peers whose pid isn't in our
+        // trusted list — nothing reaches the invite/session layer for
+        // strangers on the same WiFi.
+        let theirPid = info?["pid"] ?? ""
+        // Cache every peerID we've seen, trusted or not — scan-and-claim
+        // needs to invitePeer on a not-yet-trusted MCPeerID once the
+        // user scans its QR.
+        if !theirPid.isEmpty {
+            let captured = peerID
+            let pid = theirPid
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.discoveredPeers[pid] = captured
+                // If the user already scanned this pid's QR and we were
+                // waiting on discovery, complete the claim now.
+                if let claim = self.pendingClaim, claim.pid == pid {
+                    self.pendingClaim = nil
+                    self.sendClaimInvitation(to: captured, token: claim.token)
+                }
+            }
+        }
+        guard PeerTrust.isTrusted(theirPid) else {
+            let name = peerID.displayName
+            let pidPrefix = String(theirPid.prefix(8))
+            Task { @MainActor [weak self] in
+                try? await self?.store?.emit(WideEvent(
+                    op: "peer.discovery.skipped",
+                    outcome: .skipped,
+                    fields: [
+                        "peer_name": .string(name),
+                        "pid_prefix": .string(pidPrefix),
+                        "reason": .string("untrusted"),
+                    ]
+                ))
+            }
+            return
+        }
         // Lexical tie-break on displayName: only the side with the
         // smaller name initiates the invite. Both sides accept any
         // incoming invite, so if the loser somehow gets there first
@@ -441,14 +807,46 @@ extension PeerSync: MCNearbyServiceBrowserDelegate {
         let theirName = peerID.displayName
         guard myName < theirName else { return }
         guard let session = sessionForDelegates else { return }
-        browser.invitePeer(peerID, to: session, withContext: nil, timeout: 10)
-        Self.logger.info("inviting peer \(theirName, privacy: .public)")
+        // Skip if we're already connected to this peer — restartDiscovery
+        // cycles the browser, which re-fires foundPeer for peers still
+        // in our session. A second invite during a live session can lead
+        // MC to tear down and rebuild the connection unnecessarily.
+        guard !session.connectedPeers.contains(peerID) else { return }
+        guard let ctx = Self.encodeInvitation(pid: PeerTrust.myPairId) else { return }
+        let pid = theirPid
+        Task.detached(priority: .background) {
+            PeerTrust.updateLastSeen(pairId: pid, displayName: theirName)
+        }
+        browser.invitePeer(peerID, to: session, withContext: ctx, timeout: 10)
+        let peerName = theirName
+        let peerPid = pid
+        Task { @MainActor [weak self] in
+            try? await self?.store?.emit(WideEvent(
+                op: "peer.invitation.sent",
+                outcome: .ok,
+                fields: [
+                    "peer_name": .string(peerName),
+                    "pid_prefix": .string(String(peerPid.prefix(8))),
+                ]
+            ))
+        }
     }
 
     nonisolated func browser(
         _ browser: MCNearbyServiceBrowser,
         lostPeer peerID: MCPeerID
-    ) {}
+    ) {
+        // Clean up our discoveredPeers cache so a future claim doesn't
+        // try to invite a stale peerID. MCPeerID equality is by
+        // displayName, which is stable for the lifetime of the session.
+        let lost = peerID
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            if let pid = self.discoveredPeers.first(where: { $0.value == lost })?.key {
+                self.discoveredPeers.removeValue(forKey: pid)
+            }
+        }
+    }
 
     nonisolated func browser(
         _ browser: MCNearbyServiceBrowser,

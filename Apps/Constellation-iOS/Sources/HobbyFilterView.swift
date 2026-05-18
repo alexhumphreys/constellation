@@ -18,6 +18,7 @@ struct HobbyFilterView: View {
     // sheet state alongside the other top-level sheets.
     let onEdit: (Area) -> Void
     let syncStatus: PeerSync.Status
+    let onSyncTap: () -> Void
 
     @Environment(\.horizontalSizeClass) private var sizeClass
 
@@ -28,7 +29,11 @@ struct HobbyFilterView: View {
                     .font(.system(size: 9, weight: .semibold, design: .monospaced))
                     .tracking(2)
                     .foregroundStyle(.white.opacity(0.4))
-                SyncPill(status: syncStatus)
+                Button(action: onSyncTap) {
+                    SyncPill(status: syncStatus)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Sync settings")
                 Spacer(minLength: 8)
                 Button(action: onShare) {
                     Image(systemName: "square.and.arrow.up")

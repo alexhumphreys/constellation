@@ -38,6 +38,9 @@ struct RootView: View {
     // single sheet so we don't need a separate isPresented flag —
     // non-nil ⇒ sheet open.
     @State private var editingArea: Area? = nil
+    // Sync settings sheet (paired devices + add-device CTA), reached
+    // by tapping the sync pill.
+    @State private var showSyncSheet: Bool = false
 
     @Environment(\.horizontalSizeClass) private var sizeClass
 
@@ -113,6 +116,12 @@ struct RootView: View {
         } message: {
             Text(importError ?? "")
         }
+        .sheet(isPresented: $showSyncSheet) {
+            SyncSheet(
+                peerSync: context.peerSync,
+                onClose: { showSyncSheet = false }
+            )
+        }
         .sheet(isPresented: Binding(
             get: { editingArea != nil },
             set: { if !$0 { editingArea = nil } }
@@ -147,7 +156,8 @@ struct RootView: View {
                 onAdd: { showAddSheet = true },
                 onShare: { Task { await prepareExport() } },
                 onEdit: { editingArea = $0 },
-                syncStatus: context.peerSync.status
+                syncStatus: context.peerSync.status,
+                onSyncTap: { showSyncSheet = true }
             )
             .padding(.top, 12)
             .padding(.leading, 16)
@@ -194,7 +204,8 @@ struct RootView: View {
                 onAdd: { showAddSheet = true },
                 onShare: { Task { await prepareExport() } },
                 onEdit: { editingArea = $0 },
-                syncStatus: context.peerSync.status
+                syncStatus: context.peerSync.status,
+                onSyncTap: { showSyncSheet = true }
             )
             .padding(.top, 12)
             .padding(.leading, 12)

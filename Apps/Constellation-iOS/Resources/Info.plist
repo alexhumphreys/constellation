@@ -42,6 +42,8 @@
 		<string>_constln-sync._tcp</string>
 		<string>_constln-sync._udp</string>
 	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>Constellation uses the camera to scan a pairing code shown on another device.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Constellation syncs your skill graph between your own iPhone and iPad over your local WiFi.</string>
 	<key>UIApplicationSceneManifest</key>

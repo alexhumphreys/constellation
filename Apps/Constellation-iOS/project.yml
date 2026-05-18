@@ -62,6 +62,9 @@ targets:
         NSBonjourServices:
           - _constln-sync._tcp
           - _constln-sync._udp
+        # QR pairing flow: Constellation only accesses the camera while
+        # the user is on the Scan tab of the pair sheet.
+        NSCameraUsageDescription: "Constellation uses the camera to scan a pairing code shown on another device."
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.constellation.ios
