@@ -10,20 +10,26 @@ public struct SkillGraph: Sendable {
     public let skills: [Skill]
     private let byId: [SkillID: Skill]
     private let successorsByPredecessor: [SkillID: [SkillID]]
+    private let softSuccessorsByPredecessor: [SkillID: [SkillID]]
 
     public init(_ skills: [Skill]) {
         let live = skills.filter { !$0.isDeleted }
         self.skills = live
         var byId: [SkillID: Skill] = [:]
         var successors: [SkillID: [SkillID]] = [:]
+        var softSuccessors: [SkillID: [SkillID]] = [:]
         for skill in live {
             byId[skill.id] = skill
             for prereq in skill.prereqIds {
                 successors[prereq, default: []].append(skill.id)
             }
+            for prereq in skill.softPrereqIds {
+                softSuccessors[prereq, default: []].append(skill.id)
+            }
         }
         self.byId = byId
         self.successorsByPredecessor = successors
+        self.softSuccessorsByPredecessor = softSuccessors
     }
 
     public func skill(_ id: SkillID) -> Skill? { byId[id] }
@@ -50,7 +56,8 @@ public struct SkillGraph: Sendable {
     // Breadth-first descendant traversal — "everything this skill
     // unlocks, transitively". Bounded by `depth` so the constellation
     // canvas doesn't trace an entire connected component just because
-    // someone tapped a foundation star.
+    // someone tapped a foundation star. Walks both hard and soft
+    // prereq edges so a chain doesn't dead-end at a soft link.
     public func forwardChain(from id: SkillID, depth: Int = 4) -> [SkillID] {
         var seen: Set<SkillID> = [id]
         var ordered: [SkillID] = [id]
@@ -58,7 +65,9 @@ public struct SkillGraph: Sendable {
         while let (current, d) = frontier.first {
             frontier.removeFirst()
             if d >= depth { continue }
-            for next in successorsByPredecessor[current] ?? [] {
+            let hard = successorsByPredecessor[current] ?? []
+            let soft = softSuccessorsByPredecessor[current] ?? []
+            for next in hard + soft {
                 if seen.insert(next).inserted {
                     ordered.append(next)
                     frontier.append((next, d + 1))
@@ -76,7 +85,7 @@ public struct SkillGraph: Sendable {
             frontier.removeFirst()
             if d >= depth { continue }
             guard let skill = byId[current] else { continue }
-            for prereq in skill.prereqIds {
+            for prereq in skill.prereqIds + skill.softPrereqIds {
                 if seen.insert(prereq).inserted {
                     ordered.append(prereq)
                     frontier.append((prereq, d + 1))

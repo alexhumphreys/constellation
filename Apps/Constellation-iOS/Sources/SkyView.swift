@@ -137,7 +137,10 @@ struct SkyView: View {
                             )
                         }
                     }
-                    // Soft prereqs — dashed
+                    // Soft prereqs — dashed. Kept dashed when lit by an
+                    // active chain trace so hard vs soft stays legible,
+                    // but bumped to the gold halo so the arc doesn't
+                    // dead-end at a soft link.
                     for prereqId in skill.softPrereqIds {
                         guard let prereq = visibleSkillsById[prereqId] else {
                             continue
@@ -147,11 +150,26 @@ struct SkyView: View {
                         var path = Path()
                         path.move(to: from)
                         path.addLine(to: to)
-                        context.stroke(
-                            path,
-                            with: .color(Theme.Sky.star.opacity(0.06)),
-                            style: StrokeStyle(lineWidth: 0.6, dash: [3, 3])
-                        )
+                        let inChain = chainSkillIds.contains(skill.id)
+                            && chainSkillIds.contains(prereq.id)
+                        if inChain {
+                            context.stroke(
+                                path,
+                                with: .color(Theme.Sky.chain.opacity(0.22)),
+                                style: StrokeStyle(lineWidth: 4, dash: [6, 4])
+                            )
+                            context.stroke(
+                                path,
+                                with: .color(Theme.Sky.chain.opacity(0.90)),
+                                style: StrokeStyle(lineWidth: 1.6, dash: [3, 3])
+                            )
+                        } else {
+                            context.stroke(
+                                path,
+                                with: .color(Theme.Sky.star.opacity(0.06)),
+                                style: StrokeStyle(lineWidth: 0.6, dash: [3, 3])
+                            )
+                        }
                     }
                 }
 

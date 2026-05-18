@@ -38,6 +38,41 @@ struct SkillGraphTests {
                            SkillID("s2"), SkillID("s3")])
     }
 
+    @Test("forwardChain follows soft prereq edges")
+    func forwardChainFollowsSoft() {
+        // a ──hard──▶ b ──soft──▶ c ──hard──▶ d
+        let skills = [
+            Skill(id: SkillID("a"), areaId: AreaID("x"), name: "A"),
+            Skill(id: SkillID("b"), areaId: AreaID("x"), name: "B",
+                  prereqIds: [SkillID("a")]),
+            Skill(id: SkillID("c"), areaId: AreaID("x"), name: "C",
+                  softPrereqIds: [SkillID("b")]),
+            Skill(id: SkillID("d"), areaId: AreaID("x"), name: "D",
+                  prereqIds: [SkillID("c")]),
+        ]
+        let graph = SkillGraph(skills)
+        let chain = Set(graph.forwardChain(from: SkillID("a")))
+        #expect(chain == Set([SkillID("a"), SkillID("b"),
+                              SkillID("c"), SkillID("d")]))
+    }
+
+    @Test("backwardChain follows soft prereq edges")
+    func backwardChainFollowsSoft() {
+        let skills = [
+            Skill(id: SkillID("a"), areaId: AreaID("x"), name: "A"),
+            Skill(id: SkillID("b"), areaId: AreaID("x"), name: "B",
+                  prereqIds: [SkillID("a")]),
+            Skill(id: SkillID("c"), areaId: AreaID("x"), name: "C",
+                  softPrereqIds: [SkillID("b")]),
+            Skill(id: SkillID("d"), areaId: AreaID("x"), name: "D",
+                  prereqIds: [SkillID("c")]),
+        ]
+        let graph = SkillGraph(skills)
+        let chain = Set(graph.backwardChain(from: SkillID("d")))
+        #expect(chain == Set([SkillID("a"), SkillID("b"),
+                              SkillID("c"), SkillID("d")]))
+    }
+
     @Test("ready: only skills with all prereqs ≥ got")
     func readyFilter() {
         let skills = [
