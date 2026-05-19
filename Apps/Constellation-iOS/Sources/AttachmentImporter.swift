@@ -254,6 +254,28 @@ struct AttachmentImporter {
 
     // MARK: - Thumbnails
 
+    // Public entry: regenerate the thumbnail for a hash whose canonical
+    // bytes already exist on disk. Used by the MC blob-receive path —
+    // peers receive raw bytes from each other but never the thumbnail,
+    // so each device generates its own. Idempotent: overwrites the
+    // existing thumb file. No-op if the canonical file isn't on disk
+    // (caller should ensure the asset landed first).
+    func regenerateThumbnail(forHash hash: String, ext: String) async throws {
+        guard let url = try await assets.url(for: hash) else {
+            throw ImportError.thumbnailFailed
+        }
+        switch ext.lowercased() {
+        case "mp4", "m4v", "mov":
+            try await writeVideoThumbnail(sourceURL: url, hash: hash)
+        default:
+            // Image of some kind — JPEG, PNG, HEIC, GIF. ImageIO will
+            // decode whatever CG recognises, so we don't need a per-ext
+            // branch beyond the video discriminator.
+            let data = try Data(contentsOf: url)
+            try await writeThumbnail(from: data, isVideo: false, hash: hash)
+        }
+    }
+
     private func writeThumbnail(
         from data: Data, isVideo: Bool, hash: String
     ) async throws {

@@ -39,6 +39,14 @@ struct ConstellationApp: App {
     }
 
     private func runAssetGC(_ ctx: AppContext) async {
+        // Skip GC if a blob transfer is in flight — otherwise we could
+        // delete bytes that just landed on disk but aren't yet
+        // referenced by a merged snapshot row. Next foreground will
+        // try again once pending blobs have settled.
+        if ctx.peerSync.hasPendingIncomingBlobs {
+            Self.gcLogger.info("asset GC skipped: pending blob transfer")
+            return
+        }
         do {
             let referenced = try await ctx.store.liveContentHashes()
             let removed = try await ctx.assets.collectGarbage(referenced: referenced)

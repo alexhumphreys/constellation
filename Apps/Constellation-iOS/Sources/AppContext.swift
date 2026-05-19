@@ -37,7 +37,7 @@ final class AppContext {
     // seeded. Observers watch `peerSync.pullCount` to react to inbound
     // snapshot merges from peers.
     func startPeerSync() {
-        peerSync.start(store: store)
+        peerSync.start(store: store, assets: assets)
     }
 
     static func storeURL() -> URL {

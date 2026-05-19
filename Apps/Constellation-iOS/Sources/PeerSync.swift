@@ -102,7 +102,15 @@ final class PeerSync: NSObject {
     @ObservationIgnored private var advertiser: MCNearbyServiceAdvertiser?
     @ObservationIgnored private var browser: MCNearbyServiceBrowser?
     @ObservationIgnored private var store: Store?
+    @ObservationIgnored private var assets: AssetStore?
     @ObservationIgnored private var pushTask: Task<Void, Never>?
+    // Hashes we've asked a peer for and haven't received-and-verified
+    // yet. ConstellationApp.runAssetGC reads `hasPendingIncomingBlobs`
+    // before sweeping so we don't delete bytes that just landed but
+    // aren't yet referenced by a merged snapshot row. Cleared on each
+    // fresh snapshot merge so a dropped peer can't strand the set
+    // forever (next merge cycle re-requests anything still missing).
+    @ObservationIgnored private var pendingIncomingBlobs: Set<String> = []
     // Content hash of the most recent snapshot we sent. Don't resend
     // identical content — saves bandwidth and prevents infinite
     // ping-pong where A sends, B merges, B sends merged, A merges,
@@ -160,8 +168,11 @@ final class PeerSync: NSObject {
     // Initial sync happens as soon as a peer is found and the inbound
     // snapshot lands; no explicit "pull first" step is needed because
     // the meet-in-the-middle exchange handles both directions.
-    func start(store: Store) {
+    var hasPendingIncomingBlobs: Bool { !pendingIncomingBlobs.isEmpty }
+
+    func start(store: Store, assets: AssetStore) {
         self.store = store
+        self.assets = assets
 
         let session = MCSession(
             peer: myPeerId,
@@ -397,7 +408,7 @@ final class PeerSync: NSObject {
 
         do {
             let snapshot = try await store.snapshot()
-            let data = try Self.encode(snapshot)
+            let data = try Self.encode(PeerMessage.snapshot(snapshot))
             let hash = Self.contentHash(of: snapshot)
             if hash == lastSentHash {
                 // Content unchanged since last successful send — refresh
@@ -444,13 +455,59 @@ final class PeerSync: NSObject {
 
     // MARK: - Receive
 
-    private func handleInbound(data: Data, peerCount: Int, peerName: String) async {
+    // Entry point from the MC delegate. Decode the PeerMessage envelope
+    // and dispatch by case. Snapshot is the existing CRDT-merge path;
+    // blobRequest / blobResponse drive the attachment-bytes phase that
+    // runs after metadata merge has matched on both sides.
+    private func handleInbound(data: Data, peerCount: Int, peerID: MCPeerID) async {
         guard let store else { return }
         let start = Date()
+        let peerName = peerID.displayName
+        let msg: PeerMessage
         do {
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
-            let snapshot = try decoder.decode(ConstellationSnapshot.self, from: data)
+            msg = try Self.decode(data)
+        } catch {
+            try? await store.emit(WideEvent(
+                op: "peer.message.decode",
+                outcome: .error,
+                durationMs: Self.ms(since: start),
+                fields: [
+                    "peer_name": .string(peerName),
+                    "bytes": .int(Int64(data.count)),
+                    "error": .string(String(describing: error)),
+                ]
+            ))
+            return
+        }
+        switch msg {
+        case .snapshot(let snap):
+            await handleSnapshot(
+                snap, fromPeer: peerID, peerCount: peerCount,
+                peerName: peerName, bytes: data.count, start: start
+            )
+        case .blobRequest(let req):
+            await handleBlobRequest(
+                req, fromPeer: peerID, peerName: peerName, start: start
+            )
+        case .blobResponse(let resp):
+            await handleBlobResponse(
+                resp, peerName: peerName, bytes: data.count, start: start
+            )
+        }
+    }
+
+    // MARK: - Snapshot merge
+
+    private func handleSnapshot(
+        _ snapshot: ConstellationSnapshot,
+        fromPeer peerID: MCPeerID,
+        peerCount: Int,
+        peerName: String,
+        bytes: Int,
+        start: Date
+    ) async {
+        guard let store else { return }
+        do {
             let hash = Self.contentHash(of: snapshot)
             // Skip if we already have this exact content — covers the
             // ping-pong case where the peer is echoing back state we
@@ -463,7 +520,7 @@ final class PeerSync: NSObject {
                     durationMs: Self.ms(since: start),
                     fields: [
                         "peer_name": .string(peerName),
-                        "bytes": .int(Int64(data.count)),
+                        "bytes": .int(Int64(bytes)),
                         "reason": .string("dedupe"),
                     ]
                 ))
@@ -483,11 +540,18 @@ final class PeerSync: NSObject {
                 durationMs: Self.ms(since: start),
                 fields: [
                     "peer_name": .string(peerName),
-                    "bytes": .int(Int64(data.count)),
+                    "bytes": .int(Int64(bytes)),
                     "skills": .int(Int64(snapshot.skills.count)),
                     "areas": .int(Int64(snapshot.areas.count)),
+                    "attachments": .int(Int64(snapshot.attachments.count)),
                 ]
             ))
+            // Blob reconciliation phase: any attachment row we just
+            // received that references a hash we don't have on disk is a
+            // blob the peer should send us. Reset pendingIncomingBlobs
+            // on every merge — if a previous transfer dropped mid-way,
+            // we re-request now and let MC + the CRDT figure it out.
+            await requestMissingBlobs(fromPeer: peerID, peerName: peerName)
         } catch {
             status = .error("merge failed: \(error)")
             try? await store.emit(WideEvent(
@@ -496,14 +560,236 @@ final class PeerSync: NSObject {
                 durationMs: Self.ms(since: start),
                 fields: [
                     "peer_name": .string(peerName),
-                    "bytes": .int(Int64(data.count)),
+                    "bytes": .int(Int64(bytes)),
                     "error": .string(String(describing: error)),
                 ]
             ))
         }
     }
 
-    // MARK: - Encoding + hashing
+    // MARK: - Blob reconciliation
+
+    // Receiver side, post-merge: compute what we still need and ask the
+    // sending peer for those hashes. No-op if there's nothing missing.
+    private func requestMissingBlobs(
+        fromPeer peerID: MCPeerID, peerName: String
+    ) async {
+        guard let store, let assets, let session else { return }
+        do {
+            let live = try await store.liveContentHashes()
+            let onDisk = try await assets.onDiskHashes()
+            let needed = live.subtracting(onDisk)
+            // Reset pending each merge cycle — see field doc.
+            pendingIncomingBlobs = needed
+            guard !needed.isEmpty else { return }
+            let req = PeerMessage.BlobRequest(hashes: Array(needed))
+            let data = try Self.encode(.blobRequest(req))
+            try session.send(data, toPeers: [peerID], with: .reliable)
+            try? await store.emit(WideEvent(
+                op: "peer.blob.request",
+                outcome: .ok,
+                fields: [
+                    "peer_name": .string(peerName),
+                    "hashes_requested": .int(Int64(needed.count)),
+                ]
+            ))
+        } catch {
+            try? await store.emit(WideEvent(
+                op: "peer.blob.request",
+                outcome: .error,
+                fields: [
+                    "peer_name": .string(peerName),
+                    "error": .string(String(describing: error)),
+                ]
+            ))
+        }
+    }
+
+    // Responder side: the peer asked us for these hashes. Send back
+    // every one we have on disk; silently skip the ones we don't (the
+    // peer's request will repeat on their next merge cycle if they
+    // still need them).
+    private func handleBlobRequest(
+        _ req: PeerMessage.BlobRequest,
+        fromPeer peerID: MCPeerID,
+        peerName: String,
+        start: Date
+    ) async {
+        guard let store, let assets, let session else { return }
+        var sent = 0
+        var skipped = 0
+        for hash in req.hashes {
+            do {
+                guard let url = try await assets.url(for: hash) else {
+                    skipped += 1
+                    continue
+                }
+                let data = try Data(contentsOf: url)
+                let ext = url.pathExtension
+                let resp = PeerMessage.BlobResponse(
+                    hash: hash, ext: ext, data: data
+                )
+                let encoded = try Self.encode(.blobResponse(resp))
+                try session.send(encoded, toPeers: [peerID], with: .reliable)
+                sent += 1
+                try? await store.emit(WideEvent(
+                    op: "peer.blob.send",
+                    outcome: .ok,
+                    fields: [
+                        "peer_name": .string(peerName),
+                        "hash_prefix": .string(String(hash.prefix(12))),
+                        "bytes": .int(Int64(data.count)),
+                    ]
+                ))
+            } catch {
+                try? await store.emit(WideEvent(
+                    op: "peer.blob.send",
+                    outcome: .error,
+                    fields: [
+                        "peer_name": .string(peerName),
+                        "hash_prefix": .string(String(hash.prefix(12))),
+                        "error": .string(String(describing: error)),
+                    ]
+                ))
+            }
+        }
+        try? await store.emit(WideEvent(
+            op: "peer.blob.request.served",
+            outcome: .ok,
+            durationMs: Self.ms(since: start),
+            fields: [
+                "peer_name": .string(peerName),
+                "requested": .int(Int64(req.hashes.count)),
+                "sent": .int(Int64(sent)),
+                "skipped": .int(Int64(skipped)),
+            ]
+        ))
+    }
+
+    // Receiver side: a blob arrived. Verify the sha256 of the bytes
+    // matches the expected hash before writing — without this an
+    // adversary (or a bug) could poison the on-disk store with the
+    // wrong bytes under a trusted hash. Drop on mismatch.
+    private func handleBlobResponse(
+        _ resp: PeerMessage.BlobResponse,
+        peerName: String,
+        bytes: Int,
+        start: Date
+    ) async {
+        guard let store, let assets else { return }
+        let computed = AssetStore.sha256Hex(resp.data)
+        guard computed == resp.hash else {
+            try? await store.emit(WideEvent(
+                op: "peer.blob.receive",
+                outcome: .error,
+                durationMs: Self.ms(since: start),
+                fields: [
+                    "peer_name": .string(peerName),
+                    "hash_prefix": .string(String(resp.hash.prefix(12))),
+                    "bytes": .int(Int64(resp.data.count)),
+                    "reason": .string("hash_mismatch"),
+                ]
+            ))
+            return
+        }
+        do {
+            _ = try await assets.write(resp.data, fileExtension: resp.ext)
+            // Thumbnails are local-cache, never synced (per attachment
+            // design memo) — the receiving device generates its own from
+            // the freshly-arrived canonical bytes. Failure here doesn't
+            // poison the receive; the grid falls back to its missing-
+            // thumb glyph until next time.
+            let importer = AttachmentImporter(assets: assets, store: store)
+            do {
+                try await importer.regenerateThumbnail(
+                    forHash: resp.hash, ext: resp.ext
+                )
+            } catch {
+                try? await store.emit(WideEvent(
+                    op: "peer.blob.thumb",
+                    outcome: .error,
+                    fields: [
+                        "hash_prefix": .string(String(resp.hash.prefix(12))),
+                        "error": .string(String(describing: error)),
+                    ]
+                ))
+            }
+            pendingIncomingBlobs.remove(resp.hash)
+            try? await store.emit(WideEvent(
+                op: "peer.blob.receive",
+                outcome: .ok,
+                durationMs: Self.ms(since: start),
+                fields: [
+                    "peer_name": .string(peerName),
+                    "hash_prefix": .string(String(resp.hash.prefix(12))),
+                    "bytes": .int(Int64(resp.data.count)),
+                    "remaining": .int(Int64(pendingIncomingBlobs.count)),
+                ]
+            ))
+            // Bump pullCount so any UI listening on inbound changes
+            // (the attachments grid in SkillDetailView, future hooks)
+            // re-renders once the bytes land. Cheap signal — the grid
+            // will reload from the store + assets folder.
+            pullCount &+= 1
+        } catch {
+            try? await store.emit(WideEvent(
+                op: "peer.blob.receive",
+                outcome: .error,
+                durationMs: Self.ms(since: start),
+                fields: [
+                    "peer_name": .string(peerName),
+                    "hash_prefix": .string(String(resp.hash.prefix(12))),
+                    "bytes": .int(Int64(resp.data.count)),
+                    "reason": .string("write_error"),
+                    "error": .string(String(describing: error)),
+                ]
+            ))
+        }
+    }
+
+    // MARK: - Wire envelope
+
+    // Single Codable envelope for every MC message. Discriminator is
+    // Swift's auto-generated enum-case key, so a snapshot serialises as
+    // `{"snapshot": {...}}`, a blob request as
+    // `{"blobRequest": {"hashes": [...]}}`, etc.
+    //
+    // v1 deliberately uses a single `Data` per blob (base64-encoded
+    // inside the JSON envelope). Adequate for the typical 1080p clip
+    // (~2-15MB after re-encode); see project_next_steps for the
+    // OutputStream-chunked end state planned when video sizes grow.
+    fileprivate enum PeerMessage: Codable, Sendable {
+        case snapshot(ConstellationSnapshot)
+        case blobRequest(BlobRequest)
+        case blobResponse(BlobResponse)
+
+        struct BlobRequest: Codable, Sendable {
+            var hashes: [String]
+        }
+
+        struct BlobResponse: Codable, Sendable {
+            var hash: String
+            // Extension is the source of truth for how to name the file
+            // on disk — sender derives from the existing assets/<hash>.<ext>
+            // entry. We don't carry mimeType because the Attachment row
+            // already has it; the asset file just needs a stable name.
+            var ext: String
+            var data: Data
+        }
+    }
+
+    private static func encode(_ msg: PeerMessage) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        return try encoder.encode(msg)
+    }
+
+    private static func decode(_ data: Data) throws -> PeerMessage {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(PeerMessage.self, from: data)
+    }
 
     private static func encode(_ snap: ConstellationSnapshot) throws -> Data {
         let encoder = JSONEncoder()
@@ -626,9 +912,8 @@ extension PeerSync: MCSessionDelegate {
         fromPeer peerID: MCPeerID
     ) {
         let count = session.connectedPeers.count
-        let name = peerID.displayName
         Task { @MainActor [weak self] in
-            await self?.handleInbound(data: data, peerCount: count, peerName: name)
+            await self?.handleInbound(data: data, peerCount: count, peerID: peerID)
         }
     }
 
