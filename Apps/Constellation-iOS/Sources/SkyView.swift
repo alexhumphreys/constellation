@@ -274,10 +274,11 @@ struct SkyView: View {
                     }
 
                     // Drill = solid bright ring in the area tint. Reads
-                    // as "this is the live one." Animation (true pulse)
-                    // would need TimelineView and a per-frame redraw —
-                    // deferred; the static ring already pops because
-                    // it's solid against the dashed/no-ring neighbours.
+                    // as "this is the live one." The expanding pulse
+                    // halo on top is drawn by the TimelineView overlay
+                    // below — kept separate so only the animated layer
+                    // redraws per frame and the heavy main canvas stays
+                    // static between gesture/state changes.
                     if visual.ring == .pulse {
                         let r = visual.size + 4
                         let rect = CGRect(
@@ -345,6 +346,110 @@ struct SkyView: View {
                         with: .color(Theme.Sky.bg1.opacity(0.55))
                     )
                     context.draw(resolved, at: origin, anchor: .leading)
+                }
+            }
+            .overlay {
+                // Drill pulse overlay. Separate Canvas wrapped in
+                // TimelineView so only the pulse rings redraw at 60fps;
+                // the main canvas above stays static unless gesture or
+                // selection state changes. Hit-testing disabled so taps
+                // pass through to the gesture surface below.
+                TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { timeline in
+                    Canvas { context, _ in
+                        let drillIds: Set<SkillID> = Set(skills.compactMap {
+                            $0.status == .drill ? $0.id : nil
+                        })
+                        if drillIds.isEmpty { return }
+                        let period: Double = 2.8
+                        let now = timeline.date.timeIntervalSinceReferenceDate
+                        let phase = (now.truncatingRemainder(dividingBy: period)) / period
+                        // Half-sine envelope — eases in from 0, peaks at
+                        // mid-cycle, eases back to 0. No pop at the
+                        // wrap-around, so the breath reads as one slow
+                        // gentle rhythm instead of a hard reset.
+                        let envelope = sin(phase * .pi)
+                        let byId = Dictionary(
+                            uniqueKeysWithValues: skills.map { ($0.id, $0) }
+                        )
+
+                        // Edge pulse first so star pulse layers on top.
+                        // Additive over the static edges in the main
+                        // canvas — alpha tracks the same envelope the
+                        // ring uses so the drill star and its
+                        // connections breathe in unison.
+                        let edgeAlpha = 0.22 * envelope
+                        if edgeAlpha > 0.01 {
+                            for skill in skills {
+                                let skillIsDrill = drillIds.contains(skill.id)
+                                for prereqId in skill.prereqIds {
+                                    guard skillIsDrill || drillIds.contains(prereqId),
+                                          let prereq = byId[prereqId] else { continue }
+                                    let drillEnd = skillIsDrill ? skill : prereq
+                                    let tint = areaTints[drillEnd.areaId] ?? .gray
+                                    let fromW = worldPosition(of: prereq)
+                                    let toW = worldPosition(of: skill)
+                                    var path = Path()
+                                    path.move(to: transform.apply(fromW.x, fromW.y))
+                                    path.addLine(to: transform.apply(toW.x, toW.y))
+                                    context.stroke(
+                                        path,
+                                        with: .color(tint.opacity(edgeAlpha)),
+                                        lineWidth: 1.0
+                                    )
+                                }
+                                for prereqId in skill.softPrereqIds {
+                                    guard skillIsDrill || drillIds.contains(prereqId),
+                                          let prereq = byId[prereqId] else { continue }
+                                    let drillEnd = skillIsDrill ? skill : prereq
+                                    let tint = areaTints[drillEnd.areaId] ?? .gray
+                                    let fromW = worldPosition(of: prereq)
+                                    let toW = worldPosition(of: skill)
+                                    var path = Path()
+                                    path.move(to: transform.apply(fromW.x, fromW.y))
+                                    path.addLine(to: transform.apply(toW.x, toW.y))
+                                    context.stroke(
+                                        path,
+                                        with: .color(tint.opacity(edgeAlpha * 0.75)),
+                                        style: StrokeStyle(
+                                            lineWidth: 0.9,
+                                            dash: [2.5, 3.5]
+                                        )
+                                    )
+                                }
+                            }
+                        }
+
+                        for skill in skills where skill.status == .drill {
+                            let w = worldPosition(of: skill)
+                            let p = transform.apply(w.x, w.y)
+                            let visual = StatusVisual.of(skill.status)
+                            let tint = areaTints[skill.areaId] ?? .gray
+                            let inChain = chainSkillIds.contains(skill.id)
+                            let dim = selectedSkillId != nil
+                                && selectedSkillId != skill.id
+                                && !inChain
+                            let baseOpacity = dim
+                                ? min(0.3, visual.opacity * 0.35)
+                                : visual.opacity
+                            // Ring grows from the static-ring radius
+                            // outward, fading in and out on the same
+                            // half-sine envelope as the edges — reads
+                            // as the star "breathing" into the
+                            // surrounding sky.
+                            let r = visual.size + 4 + 8 * phase
+                            let alpha = baseOpacity * 0.5 * envelope
+                            let rect = CGRect(
+                                x: p.x - r, y: p.y - r,
+                                width: r * 2, height: r * 2
+                            )
+                            context.stroke(
+                                Path(ellipseIn: rect),
+                                with: .color(tint.opacity(alpha)),
+                                lineWidth: 1.2
+                            )
+                        }
+                    }
+                    .allowsHitTesting(false)
                 }
             }
             .overlay(
