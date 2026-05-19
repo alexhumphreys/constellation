@@ -1,4 +1,5 @@
 import ConstellationCore
+import PhotosUI
 import SwiftUI
 import UIKit
 
@@ -20,6 +21,7 @@ struct SkillDetailView: View {
     let allAreas: [Area]
     let chainActive: Bool
     let store: Store
+    let assets: AssetStore
 
     private var areasById: [AreaID: Area] {
         Dictionary(uniqueKeysWithValues: allAreas.map { ($0.id, $0) })
@@ -43,6 +45,7 @@ struct SkillDetailView: View {
     @State private var sessions: [Session] = []
     @State private var notes: [Note] = []
     @State private var clips: [Clip] = []
+    @State private var attachments: [Attachment] = []
     @State private var draftSession: String = ""
     @State private var draftNote: String = ""
     @State private var isSaving: Bool = false
@@ -54,6 +57,14 @@ struct SkillDetailView: View {
     @State private var showClipSheet: Bool = false
     @State private var editingClip: Clip? = nil
     @State private var showEditSheet: Bool = false
+    // Attachment sheet state — picker on `showAttachmentPicker`,
+    // fullscreen viewer on a non-nil `viewingAttachment`. `importing`
+    // gates the ADD button while PHPicker results are being re-encoded
+    // and written to disk (can take a moment for a 30s video).
+    @State private var showAttachmentPicker: Bool = false
+    @State private var viewingAttachment: Attachment? = nil
+    @State private var importing: Bool = false
+    @State private var importError: String? = nil
 
     private var graph: SkillGraph { SkillGraph(allSkills) }
 
@@ -65,6 +76,7 @@ struct SkillDetailView: View {
                 prereqsBlock(neighbours: graph.neighbours(of: skill.id))
                 unlocksBlock(neighbours: graph.neighbours(of: skill.id))
                 clipsSection
+                attachmentsSection
                 sessionSection
                 notesSection
                 Color.clear.frame(height: 40)  // bottom safe area
@@ -129,6 +141,35 @@ struct SkillDetailView: View {
                     onSkillDeleted()
                 }
             )
+        }
+        .sheet(isPresented: $showAttachmentPicker) {
+            AttachmentPicker { results in
+                showAttachmentPicker = false
+                guard !results.isEmpty else { return }
+                Task { await importPicked(results) }
+            }
+            .ignoresSafeArea()
+        }
+        .sheet(item: $viewingAttachment) { att in
+            AttachmentViewerSheet(
+                attachment: att,
+                store: store,
+                assets: assets,
+                onClose: { viewingAttachment = nil },
+                onDeleted: {
+                    viewingAttachment = nil
+                    Task { await reload() }
+                    onMutation()
+                }
+            )
+        }
+        .alert("Import failed", isPresented: Binding(
+            get: { importError != nil },
+            set: { if !$0 { importError = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(importError ?? "")
         }
     }
 
@@ -533,6 +574,91 @@ struct SkillDetailView: View {
         showClipSheet = true
     }
 
+    // MARK: - Attachments
+
+    // Mirrors the CLIPS section visually — count chip on the left, ADD
+    // pill on the right, empty-state hint when no items. Differs in the
+    // body: thumbnails are a wrapping grid (LazyVGrid with adaptive
+    // 80pt min) rather than a vertical list, since photos/videos read
+    // better as a contact sheet than a stacked feed.
+    @ViewBuilder
+    private var attachmentsSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("ATTACHMENTS · \(attachments.count)")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .tracking(1.6)
+                    .foregroundStyle(.white.opacity(0.45))
+                Spacer()
+                if importing {
+                    ProgressView()
+                        .scaleEffect(0.7)
+                        .tint(.white.opacity(0.7))
+                }
+                Button {
+                    showAttachmentPicker = true
+                } label: {
+                    Text("ADD")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .tracking(1.2)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4)
+                        .overlay(
+                            Capsule().stroke(.white.opacity(0.25), lineWidth: 1)
+                        )
+                        .foregroundStyle(.white.opacity(0.75))
+                }
+                .buttonStyle(.plain)
+                .disabled(importing)
+            }
+            if attachments.isEmpty {
+                Text("None yet — tap ADD to attach a photo or video from your library.")
+                    .font(.system(size: 13, design: .serif))
+                    .foregroundStyle(.white.opacity(0.45))
+            } else {
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 80), spacing: 6)],
+                    spacing: 6
+                ) {
+                    ForEach(attachments, id: \.id) { att in
+                        Button {
+                            viewingAttachment = att
+                        } label: {
+                            AttachmentThumbnail(
+                                attachment: att,
+                                assets: assets
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+    }
+
+    // PHPicker handed us N items; import them sequentially so we don't
+    // saturate the device with concurrent video transcodes. UI shows a
+    // spinner via `importing` until the last one lands.
+    private func importPicked(_ results: [PHPickerResult]) async {
+        importing = true
+        defer { importing = false }
+        let importer = AttachmentImporter(assets: assets, store: store)
+        for result in results {
+            do {
+                _ = try await importer.importPicked(result, for: skill.id)
+            } catch {
+                await MainActor.run {
+                    importError = "Couldn't import: \(error.localizedDescription)"
+                }
+                // Continue with the rest — a single bad item shouldn't
+                // abort the batch. The user sees the alert; partial
+                // success still leaves the good items attached.
+            }
+        }
+        await reload()
+        onMutation()
+    }
+
     // MARK: - Notes
 
     private var notesSection: some View {
@@ -577,10 +703,12 @@ struct SkillDetailView: View {
             let s = try await store.sessions(for: skill.id)
             let n = try await store.notes(for: skill.id)
             let c = try await store.clips(for: skill.id)
+            let a = try await store.attachments(for: skill.id)
             await MainActor.run {
                 self.sessions = s
                 self.notes = n
                 self.clips = c
+                self.attachments = a
             }
         } catch {
             print("detail reload failed: \(error)")

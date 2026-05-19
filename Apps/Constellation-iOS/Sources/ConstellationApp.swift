@@ -1,9 +1,15 @@
 import SwiftUI
+import os
 
 @main
 struct ConstellationApp: App {
     @State private var context: AppContext?
     @State private var loadError: String?
+    @Environment(\.scenePhase) private var scenePhase
+
+    private static let gcLogger = Logger(
+        subsystem: "com.constellation.ios", category: "asset-gc"
+    )
 
     var body: some Scene {
         WindowGroup {
@@ -19,6 +25,28 @@ struct ConstellationApp: App {
                 }
             }
             .background(Theme.Sky.bg1.ignoresSafeArea())
+        }
+        // Run asset GC each time the app comes to the foreground. The
+        // canonical write paths (attachment add, tombstone, snapshot
+        // merge) all converge on `liveContentHashes()`; anything on disk
+        // not in that set is an orphan. .active is throttled by iOS so
+        // this fires once per foreground, which is a fine cadence — GC
+        // is housekeeping, not a hot path.
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active, let ctx = context else { return }
+            Task { await runAssetGC(ctx) }
+        }
+    }
+
+    private func runAssetGC(_ ctx: AppContext) async {
+        do {
+            let referenced = try await ctx.store.liveContentHashes()
+            let removed = try await ctx.assets.collectGarbage(referenced: referenced)
+            if removed > 0 {
+                Self.gcLogger.info("asset GC removed \(removed) orphans")
+            }
+        } catch {
+            Self.gcLogger.error("asset GC failed: \(String(describing: error), privacy: .public)")
         }
     }
 

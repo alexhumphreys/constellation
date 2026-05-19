@@ -13,12 +13,17 @@ import os
 @MainActor
 final class AppContext {
     let store: Store
+    let assets: AssetStore
     let peerSync = PeerSync()
 
     init() throws {
         let url = Self.storeURL()
         Self.logger.info("opening store at \(url.path, privacy: .public)")
         self.store = try Store(url: url, sink: OSLogSink())
+        let assetsRoot = url
+            .deletingLastPathComponent()
+            .appendingPathComponent("assets", isDirectory: true)
+        self.assets = try AssetStore(root: assetsRoot)
     }
 
     func seedIfEmpty() async throws {
