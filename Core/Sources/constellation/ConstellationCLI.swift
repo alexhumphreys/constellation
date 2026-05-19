@@ -12,6 +12,7 @@ struct ConstellationCLI: AsyncParsableCommand {
             SessionCommands.self,
             NoteCommands.self,
             ClipCommands.self,
+            AttachmentCommands.self,
             ReadyCommand.self,
             JournalCommand.self,
             ExportCommand.self,

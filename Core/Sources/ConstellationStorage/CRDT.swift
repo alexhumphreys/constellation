@@ -96,6 +96,23 @@ public enum CRDT {
         return out
     }
 
+    // Attachment uses the same hybrid as Clip — mutable body (caption)
+    // settled by LWW, earliest-tombstone for delete. The other fields
+    // are immutable post-capture, so the LWW branch effectively only
+    // decides which caption wins when two devices captioned the same
+    // attachment concurrently.
+    public static func mergeMutableAppendOnly(_ a: Attachment, _ b: Attachment) -> Attachment {
+        precondition(a.id == b.id, "mergeMutableAppendOnly called on different IDs")
+        var out: Attachment
+        if a.updatedAt != b.updatedAt {
+            out = a.updatedAt > b.updatedAt ? a : b
+        } else {
+            out = a.id.rawValue >= b.id.rawValue ? a : b
+        }
+        out.tombstonedAt = earliestTombstone(a.tombstonedAt, b.tombstonedAt)
+        return out
+    }
+
     private static func earliestTombstone(_ a: Date?, _ b: Date?) -> Date? {
         switch (a, b) {
         case (nil, nil): return nil
@@ -120,7 +137,10 @@ public struct ConstellationSnapshot: Codable, Sendable, Hashable {
     // ride through sync. Both devices must be on the same build for
     // pairing — we reject mismatched versions loudly rather than
     // silently filling in defaults.
-    public static let currentSchemaVersion: Int = 4
+    // v4 → v5: Attachment entity added for device-captured photos and
+    // videos. Snapshot ships metadata refs only; bytes are content-
+    // addressed in `Documents/assets/<hash>` and transferred out-of-band.
+    public static let currentSchemaVersion: Int = 5
 
     public var schemaVersion: Int
     public var generatedAt: Date
@@ -130,6 +150,7 @@ public struct ConstellationSnapshot: Codable, Sendable, Hashable {
     public var sessions: [Session]
     public var notes: [Note]
     public var clips: [Clip]
+    public var attachments: [Attachment]
 
     public init(
         schemaVersion: Int = ConstellationSnapshot.currentSchemaVersion,
@@ -139,7 +160,8 @@ public struct ConstellationSnapshot: Codable, Sendable, Hashable {
         chains: [Chain] = [],
         sessions: [Session] = [],
         notes: [Note] = [],
-        clips: [Clip] = []
+        clips: [Clip] = [],
+        attachments: [Attachment] = []
     ) {
         self.schemaVersion = schemaVersion
         self.generatedAt = generatedAt
@@ -149,6 +171,7 @@ public struct ConstellationSnapshot: Codable, Sendable, Hashable {
         self.sessions = sessions
         self.notes = notes
         self.clips = clips
+        self.attachments = attachments
     }
 
     // Pure function — merges two snapshots into a third without
@@ -168,7 +191,10 @@ public struct ConstellationSnapshot: Codable, Sendable, Hashable {
                 a.sessions, b.sessions, key: \.id, merge: CRDT.mergeAppendOnly
             ),
             notes: mergeById(a.notes, b.notes, key: \.id, merge: CRDT.mergeAppendOnly),
-            clips: mergeById(a.clips, b.clips, key: \.id, merge: CRDT.mergeMutableAppendOnly)
+            clips: mergeById(a.clips, b.clips, key: \.id, merge: CRDT.mergeMutableAppendOnly),
+            attachments: mergeById(
+                a.attachments, b.attachments, key: \.id, merge: CRDT.mergeMutableAppendOnly
+            )
         )
     }
 

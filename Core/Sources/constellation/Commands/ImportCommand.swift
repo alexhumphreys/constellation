@@ -28,6 +28,7 @@ struct ImportCommand: AsyncParsableCommand {
             merged snapshot (schema v\(snapshot.schemaVersion)):
               areas=\(stats.areas) skills=\(stats.skills) chains=\(stats.chains)
               sessions=\(stats.sessions) notes=\(stats.notes) clips=\(stats.clips)
+              attachments=\(stats.attachments)
             """)
     }
 }

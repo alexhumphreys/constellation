@@ -85,6 +85,18 @@ enum Migrations {
             }
         }
 
+        // New `attachments` table for device-captured photos and videos.
+        // Distinct from `clips` (which holds streamable platform-hosted
+        // refs) because Attachment owns its bytes and the storage, sync,
+        // and GC mechanics that come with that. `content_hash` is the
+        // sha256-hex of the file bytes and doubles as the on-disk
+        // filename stem (`Documents/assets/<content_hash>.<ext>`) and
+        // the MC blob-reconciliation key. Indexed because the GC path
+        // and the sync request-set both pivot on it.
+        m.registerMigration("v5_attachments") { db in
+            try createAttachmentsTable(db)
+        }
+
         return m
     }
 
@@ -197,6 +209,35 @@ enum Migrations {
         try db.create(
             index: "idx_clips_skill_added", on: "clips",
             columns: ["skill_id", "added_at"]
+        )
+    }
+
+    private static func createAttachmentsTable(_ db: Database) throws {
+        try db.create(table: "attachments") { t in
+            t.primaryKey("id", .text)
+            t.column("skill_id", .text)
+                .notNull()
+                .references("skills", onDelete: .restrict)
+            t.column("content_hash", .text).notNull()
+            t.column("media_type", .text).notNull()
+            t.column("mime_type", .text).notNull()
+            t.column("byte_size", .integer).notNull()
+            t.column("width", .integer).notNull()
+            t.column("height", .integer).notNull()
+            t.column("duration_ms", .integer)
+            t.column("captured_at", .datetime)
+            t.column("caption", .text)
+            t.column("added_at", .datetime).notNull()
+            t.column("updated_at", .datetime).notNull()
+            t.column("tombstoned_at", .datetime)
+        }
+        try db.create(
+            index: "idx_attachments_skill_added", on: "attachments",
+            columns: ["skill_id", "added_at"]
+        )
+        try db.create(
+            index: "idx_attachments_content_hash", on: "attachments",
+            columns: ["content_hash"]
         )
     }
 

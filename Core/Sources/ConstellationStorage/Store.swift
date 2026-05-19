@@ -335,6 +335,76 @@ public actor Store {
         }
     }
 
+    // MARK: - Attachment
+
+    public func upsertAttachment(_ attachment: Attachment) throws {
+        let start = now()
+        let existing = try writer.read { db in
+            try AttachmentRow.fetchOne(db, key: attachment.id.rawValue)?.toModel()
+        }
+        let merged = existing.map { CRDT.mergeMutableAppendOnly($0, attachment) } ?? attachment
+        try writer.write { db in
+            try AttachmentRow(merged).save(db)
+            try insertEvent(
+                db,
+                WideEvent(
+                    op: "attachment.add",
+                    timestamp: start,
+                    outcome: .ok,
+                    durationMs: ms(since: start),
+                    fields: [
+                        "skill_id": .string(attachment.skillId.rawValue),
+                        "attachment_id": .string(attachment.id.rawValue),
+                        "content_hash": .string(attachment.contentHash),
+                        "media_type": .string(attachment.mediaType.rawValue),
+                        "byte_size": .int(attachment.byteSize),
+                        "was_existing": .bool(existing != nil),
+                    ]
+                )
+            )
+        }
+    }
+
+    public func attachments(for skillId: SkillID) throws -> [Attachment] {
+        try writer.read { db in
+            try AttachmentRow
+                .filter(Column("skill_id") == skillId.rawValue)
+                .order(Column("added_at").desc)
+                .fetchAll(db)
+                .map { $0.toModel() }
+                .filter { !$0.isDeleted }
+        }
+    }
+
+    public func attachment(_ id: AttachmentID) throws -> Attachment? {
+        try writer.read { db in
+            try AttachmentRow.fetchOne(db, key: id.rawValue)?.toModel()
+        }
+    }
+
+    public func tombstoneAttachment(_ id: AttachmentID) throws {
+        guard var a = try self.attachment(id) else { return }
+        a.tombstonedAt = now()
+        a.updatedAt = now()
+        try upsertAttachment(a)
+    }
+
+    // Set of `contentHash`es referenced by at least one live (non-
+    // tombstoned) attachment. The MC blob-reconciliation phase compares
+    // this against the on-disk asset set to decide what to request from
+    // a peer; the GC path compares it against the on-disk set to decide
+    // what to delete. Tombstoned rows are excluded — they keep ids alive
+    // for sync convergence but their bytes are eligible for collection
+    // once no other live row references the same hash.
+    public func liveContentHashes() throws -> Set<String> {
+        try writer.read { db in
+            let rows = try AttachmentRow
+                .filter(Column("tombstoned_at") == nil)
+                .fetchAll(db)
+            return Set(rows.map { $0.contentHash })
+        }
+    }
+
     // MARK: - Snapshot (export/import)
 
     public func snapshot() throws -> ConstellationSnapshot {
@@ -345,7 +415,8 @@ public actor Store {
                 chains: try ChainRow.fetchAll(db).map { $0.toModel() },
                 sessions: try SessionRow.fetchAll(db).map { $0.toModel() },
                 notes: try NoteRow.fetchAll(db).map { $0.toModel() },
-                clips: try ClipRow.fetchAll(db).map { $0.toModel() }
+                clips: try ClipRow.fetchAll(db).map { $0.toModel() },
+                attachments: try AttachmentRow.fetchAll(db).map { $0.toModel() }
             )
         }
     }
@@ -367,13 +438,15 @@ public actor Store {
         for session in snapshot.sessions { try upsertSession(session) }
         for note in snapshot.notes { try upsertNote(note) }
         for clip in snapshot.clips { try upsertClip(clip) }
+        for attachment in snapshot.attachments { try upsertAttachment(attachment) }
         let stats = MergeStats(
             areas: snapshot.areas.count,
             skills: snapshot.skills.count,
             chains: snapshot.chains.count,
             sessions: snapshot.sessions.count,
             notes: snapshot.notes.count,
-            clips: snapshot.clips.count
+            clips: snapshot.clips.count,
+            attachments: snapshot.attachments.count
         )
         try writer.write { db in
             try insertEvent(
@@ -390,6 +463,7 @@ public actor Store {
                         "sessions": .int(Int64(stats.sessions)),
                         "notes": .int(Int64(stats.notes)),
                         "clips": .int(Int64(stats.clips)),
+                        "attachments": .int(Int64(stats.attachments)),
                     ]
                 )
             )
@@ -404,6 +478,7 @@ public actor Store {
         public let sessions: Int
         public let notes: Int
         public let clips: Int
+        public let attachments: Int
     }
 
     // MARK: - Wide events / journal

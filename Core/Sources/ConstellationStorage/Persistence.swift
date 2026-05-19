@@ -254,6 +254,65 @@ struct ClipRow: Codable, FetchableRecord, PersistableRecord {
     }
 }
 
+struct AttachmentRow: Codable, FetchableRecord, PersistableRecord {
+    static let databaseTableName = "attachments"
+    static let databaseColumnDecodingStrategy: DatabaseColumnDecodingStrategy =
+        .convertFromSnakeCase
+    static let databaseColumnEncodingStrategy: DatabaseColumnEncodingStrategy =
+        .convertToSnakeCase
+
+    var id: String
+    var skillId: String
+    var contentHash: String
+    var mediaType: String
+    var mimeType: String
+    var byteSize: Int64
+    var width: Int
+    var height: Int
+    var durationMs: Int?
+    var capturedAt: Date?
+    var caption: String?
+    var addedAt: Date
+    var updatedAt: Date
+    var tombstonedAt: Date?
+
+    init(_ a: Attachment) {
+        self.id = a.id.rawValue
+        self.skillId = a.skillId.rawValue
+        self.contentHash = a.contentHash
+        self.mediaType = a.mediaType.rawValue
+        self.mimeType = a.mimeType
+        self.byteSize = a.byteSize
+        self.width = a.width
+        self.height = a.height
+        self.durationMs = a.durationMs
+        self.capturedAt = a.capturedAt
+        self.caption = a.caption
+        self.addedAt = a.addedAt
+        self.updatedAt = a.updatedAt
+        self.tombstonedAt = a.tombstonedAt
+    }
+
+    func toModel() -> Attachment {
+        Attachment(
+            id: AttachmentID(id),
+            skillId: SkillID(skillId),
+            contentHash: contentHash,
+            mediaType: MediaType(rawValue: mediaType) ?? .photo,
+            mimeType: mimeType,
+            byteSize: byteSize,
+            width: width,
+            height: height,
+            durationMs: durationMs,
+            capturedAt: capturedAt,
+            caption: caption,
+            addedAt: addedAt,
+            updatedAt: updatedAt,
+            tombstonedAt: tombstonedAt
+        )
+    }
+}
+
 struct WideEventRow: Codable, FetchableRecord, PersistableRecord {
     static let databaseTableName = "wide_events"
     static let databaseColumnDecodingStrategy: DatabaseColumnDecodingStrategy =

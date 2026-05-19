@@ -72,3 +72,14 @@ public struct ClipID: StringID {
         ClipID(UUID().uuidString.lowercased())
     }
 }
+
+public struct AttachmentID: StringID {
+    public let rawValue: String
+    public init?(rawValue: String) {
+        guard !rawValue.isEmpty else { return nil }
+        self.rawValue = rawValue
+    }
+    public static func generate() -> AttachmentID {
+        AttachmentID(UUID().uuidString.lowercased())
+    }
+}
