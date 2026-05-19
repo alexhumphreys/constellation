@@ -1,15 +1,11 @@
+import ConstellationCore
 import SwiftUI
-import os
 
 @main
 struct ConstellationApp: App {
     @State private var context: AppContext?
     @State private var loadError: String?
     @Environment(\.scenePhase) private var scenePhase
-
-    private static let gcLogger = Logger(
-        subsystem: "com.constellation.ios", category: "asset-gc"
-    )
 
     var body: some Scene {
         WindowGroup {
@@ -39,22 +35,38 @@ struct ConstellationApp: App {
     }
 
     private func runAssetGC(_ ctx: AppContext) async {
+        let start = Date()
         // Skip GC if a blob transfer is in flight — otherwise we could
         // delete bytes that just landed on disk but aren't yet
         // referenced by a merged snapshot row. Next foreground will
         // try again once pending blobs have settled.
         if ctx.peerSync.hasPendingIncomingBlobs {
-            Self.gcLogger.info("asset GC skipped: pending blob transfer")
+            try? await ctx.store.emit(WideEvent(
+                op: "asset.gc",
+                outcome: .skipped,
+                fields: ["reason": .string("pending_transfer")]
+            ))
             return
         }
         do {
             let referenced = try await ctx.store.liveContentHashes()
             let removed = try await ctx.assets.collectGarbage(referenced: referenced)
-            if removed > 0 {
-                Self.gcLogger.info("asset GC removed \(removed) orphans")
-            }
+            try? await ctx.store.emit(WideEvent(
+                op: "asset.gc",
+                outcome: .ok,
+                durationMs: Date().timeIntervalSince(start) * 1000,
+                fields: [
+                    "removed": .int(Int64(removed)),
+                    "referenced": .int(Int64(referenced.count)),
+                ]
+            ))
         } catch {
-            Self.gcLogger.error("asset GC failed: \(String(describing: error), privacy: .public)")
+            try? await ctx.store.emit(WideEvent(
+                op: "asset.gc",
+                outcome: .error,
+                durationMs: Date().timeIntervalSince(start) * 1000,
+                fields: ["error": .string(String(describing: error))]
+            ))
         }
     }
 
