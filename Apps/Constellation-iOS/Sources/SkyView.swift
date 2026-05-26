@@ -44,8 +44,18 @@ struct SkyView: View {
     // no trace is on. Used purely for rendering — the canvas doesn't
     // own the chain state, it just highlights what the parent supplies.
     let chainSkillIds: Set<SkillID>
+    // Multiplier applied to the chain highlight color alphas. 1.0 =
+    // fully on; 0.0 = invisible (and the underlying normal edges show
+    // through). The parent uses this to fade the trace out smoothly
+    // on canvas gestures instead of dropping it instantly.
+    let chainHighlightOpacity: Double
     let store: Store
     let onMutation: () -> Void
+    // Fired on the first tick of any user-driven pan/pinch on the
+    // canvas. The parent uses this to dismiss transient overlays
+    // (e.g. the chain trace) so they don't outlive the context that
+    // explains them.
+    let onCanvasGesture: () -> Void
     @Binding var selectedSkillId: SkillID?
     // When set, pan/zoom to that skill and clear the binding. Lets the
     // parent ask the canvas to recenter on a target after a state change
@@ -64,22 +74,26 @@ struct SkyView: View {
         areas: [Area],
         initialFocus: InitialFocus = .all,
         chainSkillIds: Set<SkillID> = [],
+        chainHighlightOpacity: Double = 1.0,
         store: Store,
         onMutation: @escaping () -> Void,
         selectedSkillId: Binding<SkillID?>,
         focusRequest: Binding<FocusRequest?> = .constant(nil),
         focusVerticalBias: CGFloat = 0.5,
+        onCanvasGesture: @escaping () -> Void = {},
         onAdd: @escaping () -> Void = {}
     ) {
         self.skills = skills
         self.areas = areas
         self.initialFocus = initialFocus
         self.chainSkillIds = chainSkillIds
+        self.chainHighlightOpacity = chainHighlightOpacity
         self.store = store
         self.onMutation = onMutation
         self._selectedSkillId = selectedSkillId
         self._focusRequest = focusRequest
         self.focusVerticalBias = focusVerticalBias
+        self.onCanvasGesture = onCanvasGesture
         self.onAdd = onAdd
     }
 
@@ -163,27 +177,30 @@ struct SkyView: View {
                         var path = Path()
                         path.move(to: from)
                         path.addLine(to: to)
+                        // Always render the normal edge underneath so
+                        // it shows through as the gold chain overlay
+                        // fades out on canvas gesture.
+                        context.stroke(
+                            path,
+                            with: .color(Theme.Sky.star.opacity(
+                                opacityForEdge(skill: skill, prereq: prereq))),
+                            lineWidth: 0.8
+                        )
                         let inChain = chainSkillIds.contains(skill.id)
                             && chainSkillIds.contains(prereq.id)
-                        if inChain {
+                        if inChain && chainHighlightOpacity > 0 {
                             // Soft halo + bright core = "glowing arc"
-                            // through the traced chain.
+                            // through the traced chain. Wide strokes
+                            // cover the underlying grey at full opacity.
                             context.stroke(
                                 path,
-                                with: .color(Theme.Sky.chain.opacity(0.22)),
+                                with: .color(Theme.Sky.chain.opacity(0.22 * chainHighlightOpacity)),
                                 lineWidth: 4
                             )
                             context.stroke(
                                 path,
-                                with: .color(Theme.Sky.chain.opacity(0.90)),
+                                with: .color(Theme.Sky.chain.opacity(0.90 * chainHighlightOpacity)),
                                 lineWidth: 1.6
-                            )
-                        } else {
-                            context.stroke(
-                                path,
-                                with: .color(Theme.Sky.star.opacity(
-                                    opacityForEdge(skill: skill, prereq: prereq))),
-                                lineWidth: 0.8
                             )
                         }
                     }
@@ -200,33 +217,34 @@ struct SkyView: View {
                         var path = Path()
                         path.move(to: from)
                         path.addLine(to: to)
+                        // Always render the faint dashed soft edge
+                        // underneath so it shows through as the gold
+                        // chain overlay fades out on canvas gesture.
+                        // Dialed up from the original 0.06 so the soft
+                        // graph is actually decodable on the canvas
+                        // (was almost invisible at default zoom). Dash
+                        // kept tight so it still reads as "lighter"
+                        // next to a hard edge.
+                        let isAdjacent = selectedSkillId == skill.id
+                            || selectedSkillId == prereq.id
+                        let softAlpha = isAdjacent ? 0.40 : 0.14
+                        context.stroke(
+                            path,
+                            with: .color(Theme.Sky.star.opacity(softAlpha)),
+                            style: StrokeStyle(lineWidth: 0.7, dash: [2.5, 3.5])
+                        )
                         let inChain = chainSkillIds.contains(skill.id)
                             && chainSkillIds.contains(prereq.id)
-                        if inChain {
+                        if inChain && chainHighlightOpacity > 0 {
                             context.stroke(
                                 path,
-                                with: .color(Theme.Sky.chain.opacity(0.22)),
+                                with: .color(Theme.Sky.chain.opacity(0.22 * chainHighlightOpacity)),
                                 style: StrokeStyle(lineWidth: 4, dash: [6, 4])
                             )
                             context.stroke(
                                 path,
-                                with: .color(Theme.Sky.chain.opacity(0.90)),
+                                with: .color(Theme.Sky.chain.opacity(0.90 * chainHighlightOpacity)),
                                 style: StrokeStyle(lineWidth: 1.6, dash: [3, 3])
-                            )
-                        } else {
-                            // Soft prereq, non-chain: faint dashed, but
-                            // dialed up from the original 0.06 so the
-                            // soft graph is actually decodable on the
-                            // canvas (was almost invisible at default
-                            // zoom). Dash kept tight so it still reads
-                            // as "lighter" next to a hard edge.
-                            let isAdjacent = selectedSkillId == skill.id
-                                || selectedSkillId == prereq.id
-                            let alpha = isAdjacent ? 0.40 : 0.14
-                            context.stroke(
-                                path,
-                                with: .color(Theme.Sky.star.opacity(alpha)),
-                                style: StrokeStyle(lineWidth: 0.7, dash: [2.5, 3.5])
                             )
                         }
                     }
@@ -490,7 +508,8 @@ struct SkyView: View {
                     },
                     onDragEnded: {
                         endDrag()
-                    }
+                    },
+                    onCanvasGestureBegan: onCanvasGesture
                 )
             )
             .overlay(alignment: .bottomTrailing) {

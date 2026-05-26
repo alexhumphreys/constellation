@@ -34,6 +34,10 @@ struct CanvasGestureSurface: UIViewRepresentable {
     let onDragBegan: (CGPoint) -> Bool
     let onDragChanged: (CGPoint) -> Void
     let onDragEnded: () -> Void
+    // Fired once at the start of any user-driven canvas gesture
+    // (pan or pinch). Used by the host to dismiss transient overlays
+    // — chain trace, etc. — without needing to watch offset/scale.
+    var onCanvasGestureBegan: () -> Void = {}
 
     func makeUIView(context: Context) -> UIView {
         let view = TouchView()
@@ -156,6 +160,8 @@ struct CanvasGestureSurface: UIViewRepresentable {
                 return
             }
             switch g.state {
+            case .began:
+                parent.onCanvasGestureBegan()
             case .changed:
                 let t = g.translation(in: g.view)
                 parent.offset.width  += t.x
@@ -179,6 +185,7 @@ struct CanvasGestureSurface: UIViewRepresentable {
                     x: (anchor.x - parent.offset.width)  / pinchStartScale,
                     y: (anchor.y - parent.offset.height) / pinchStartScale
                 )
+                parent.onCanvasGestureBegan()
 
             case .changed:
                 // location(in:) returns the *current* centroid, which
