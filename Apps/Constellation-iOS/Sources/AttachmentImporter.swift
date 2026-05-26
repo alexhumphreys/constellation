@@ -33,6 +33,11 @@ struct AttachmentImporter {
     // 1920) for video matches the design memo.
     static let photoLongEdge: CGFloat = 2048
     static let thumbnailLongEdge: CGFloat = 200
+    // Number of frames extracted from each video for the cycling
+    // preview in the attachment grid. 8 covers most short training
+    // clips well; longer clips still feel "scrubbed" without being
+    // too disk-heavy (~8 × ~20KB = 160KB extra per video).
+    static let stripFrameCount: Int = 8
 
     // Top-level entry: take one PHPicker result, hand back an Attachment
     // already persisted to the store. Throws if the item provider's
@@ -164,6 +169,9 @@ struct AttachmentImporter {
         let data = try Data(contentsOf: exportedURL)
         let hash = try await assets.write(data, fileExtension: "mp4")
         try await writeVideoThumbnail(sourceURL: exportedURL, hash: hash)
+        // Best-effort: cycling-preview strip. Failure here doesn't fail
+        // the import — the grid falls back to the single static thumb.
+        try? await writeVideoStrip(sourceURL: exportedURL, hash: hash)
         let attachment = Attachment(
             skillId: skillId,
             contentHash: hash,
@@ -267,6 +275,10 @@ struct AttachmentImporter {
         switch ext.lowercased() {
         case "mp4", "m4v", "mov":
             try await writeVideoThumbnail(sourceURL: url, hash: hash)
+            // Best-effort strip regen for the cycling preview. Same
+            // policy as the import path — don't fail the whole
+            // regeneration if strip extraction stumbles.
+            try? await writeVideoStrip(sourceURL: url, hash: hash)
         default:
             // Image of some kind — JPEG, PNG, HEIC, GIF. ImageIO will
             // decode whatever CG recognises, so we don't need a per-ext
@@ -283,6 +295,112 @@ struct AttachmentImporter {
             return
         }
         try await writeThumbnail(from: src, hash: hash)
+    }
+
+    // Extract `stripFrameCount` evenly-spaced frames across the video's
+    // duration and write each as `thumbs/<hash>-strip/<i>.jpg`. Powers
+    // the cycling-preview behaviour in the attachment grid — the tile
+    // cycles through these to give a sense of motion without playing
+    // the full video. Single AVAssetImageGenerator call so the asset is
+    // only decoded once, not N times.
+    func writeVideoStrip(sourceURL: URL, hash: String) async throws {
+        let asset = AVURLAsset(url: sourceURL)
+        let duration = try await asset.load(.duration)
+        let seconds = CMTimeGetSeconds(duration)
+        guard seconds.isFinite, seconds > 0 else { return }
+
+        let n = Self.stripFrameCount
+        // (i + 0.5)/n samples the *middle* of each Nth — avoids the
+        // black-frame trap at t = 0 for the first slot and avoids
+        // landing past EOF for the last.
+        let times: [NSValue] = (0..<n).map { i in
+            let t = (Double(i) + 0.5) / Double(n) * seconds
+            return NSValue(time: CMTime(seconds: t, preferredTimescale: 600))
+        }
+
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        let maxPx = Int(Self.thumbnailLongEdge * UIScreen.main.scale)
+        generator.maximumSize = CGSize(width: maxPx, height: maxPx)
+        // Don't snap to the nearest sync sample — distorts the
+        // even-spacing intent on long clips with sparse keyframes.
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+
+        let stripDir = await assets.thumbsRoot
+            .appendingPathComponent("\(hash)-strip", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: stripDir, withIntermediateDirectories: true
+        )
+
+        // Use the legacy generateCGImagesAsynchronously rather than the
+        // newer per-call async API so we get a single batch that processes
+        // all frames against one decoder context. State for the per-frame
+        // callbacks is wrapped in a locked class — the callback runs on
+        // the generator's private queue, can't safely close over plain
+        // `var`s from this scope.
+        let state = StripState(pending: times.count)
+        // Map request time → ordinal so we can name the file by index
+        // even when the generator returns frames out of order.
+        let indexByTime: [CMTime: Int] = Dictionary(
+            uniqueKeysWithValues: times.enumerated().map {
+                ($0.element.timeValue, $0.offset)
+            }
+        )
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            generator.generateCGImagesAsynchronously(forTimes: times) {
+                requestedTime, image, _, result, error in
+                if let error {
+                    let snap = state.recordError(error)
+                    if snap.pending == 0 { Self.finish(snap, cont: cont) }
+                    return
+                }
+                if result == .succeeded, let image,
+                   let i = indexByTime[requestedTime] {
+                    let dest = stripDir.appendingPathComponent("\(i).jpg")
+                    Self.writeJPEG(cgImage: image, to: dest)
+                }
+                let snap = state.recordDone()
+                if snap.pending == 0 { Self.finish(snap, cont: cont) }
+            }
+        }
+    }
+
+    private static func finish(
+        _ snap: (pending: Int, firstError: Error?),
+        cont: CheckedContinuation<Void, Error>
+    ) {
+        if let err = snap.firstError {
+            cont.resume(throwing: err)
+        } else {
+            cont.resume()
+        }
+    }
+
+    // Locked accumulator for the strip-extraction batch — counts down
+    // pending frames across the generator's private-queue callbacks so
+    // the host await can resume once all frames have been processed.
+    private final class StripState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var pending: Int
+        private var firstError: Error?
+
+        init(pending: Int) {
+            self.pending = pending
+        }
+
+        func recordError(_ error: Error) -> (pending: Int, firstError: Error?) {
+            lock.lock(); defer { lock.unlock() }
+            if firstError == nil { firstError = error }
+            pending -= 1
+            return (pending, firstError)
+        }
+
+        func recordDone() -> (pending: Int, firstError: Error?) {
+            lock.lock(); defer { lock.unlock() }
+            pending -= 1
+            return (pending, firstError)
+        }
     }
 
     private func writeVideoThumbnail(sourceURL: URL, hash: String) async throws {
@@ -331,22 +449,35 @@ struct AttachmentImporter {
     private func writeThumbnailJPEG(cgImage: CGImage, hash: String) async throws {
         let thumbsDir = await assets.thumbsRoot
         let dest = thumbsDir.appendingPathComponent("\(hash).jpg")
+        guard Self.writeJPEG(cgImage: cgImage, to: dest) else {
+            throw ImportError.thumbnailFailed
+        }
+    }
+
+    // Synchronous CGImage → JPEG file writer, shared by the single-
+    // thumbnail and the multi-frame strip writers. Sync because the
+    // strip path needs to call it from an AVAssetImageGenerator
+    // completion block, which isn't async. Returns whether the write
+    // succeeded so callers can decide whether a failure is fatal.
+    @discardableResult
+    static func writeJPEG(cgImage: CGImage, to dest: URL) -> Bool {
         let out = NSMutableData()
         guard
             let dst = CGImageDestinationCreateWithData(
                 out, UTType.jpeg.identifier as CFString, 1, nil
             )
-        else {
-            throw ImportError.thumbnailFailed
-        }
+        else { return false }
         let writeOpts: [CFString: Any] = [
             kCGImageDestinationLossyCompressionQuality: 0.80
         ]
         CGImageDestinationAddImage(dst, cgImage, writeOpts as CFDictionary)
-        guard CGImageDestinationFinalize(dst) else {
-            throw ImportError.thumbnailFailed
+        guard CGImageDestinationFinalize(dst) else { return false }
+        do {
+            try (out as Data).write(to: dest, options: .atomic)
+            return true
+        } catch {
+            return false
         }
-        try (out as Data).write(to: dest, options: .atomic)
     }
 
     // MARK: - Item-provider helpers

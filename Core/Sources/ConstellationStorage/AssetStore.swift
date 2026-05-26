@@ -92,6 +92,12 @@ public actor AssetStore {
         // accumulating after the canonical bytes are gone.
         let thumb = thumbsRoot.appendingPathComponent("\(contentHash).jpg")
         try? FileManager.default.removeItem(at: thumb)
+        // Video filmstrip (cycling preview frames). Optional — only
+        // present for video attachments. Treat as best-effort like the
+        // thumb above.
+        let strip = thumbsRoot
+            .appendingPathComponent("\(contentHash)-strip", isDirectory: true)
+        try? FileManager.default.removeItem(at: strip)
     }
 
     // Delete on-disk hashes not present in `referenced`. Returns the

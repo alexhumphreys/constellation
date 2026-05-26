@@ -46,6 +46,11 @@ struct SkillDetailView: View {
     @State private var notes: [Note] = []
     @State private var clips: [Clip] = []
     @State private var attachments: [Attachment] = []
+    // Bumped after each successful video-strip backfill so the
+    // attachment thumbnails re-read disk and start cycling. Per-success
+    // bump rather than a single end-of-batch bump so videos light up
+    // progressively as their strips land.
+    @State private var stripVersion: Int = 0
     @State private var draftSession: String = ""
     @State private var draftNote: String = ""
     @State private var isSaving: Bool = false
@@ -626,7 +631,8 @@ struct SkillDetailView: View {
                         } label: {
                             AttachmentThumbnail(
                                 attachment: att,
-                                assets: assets
+                                assets: assets,
+                                reloadToken: stripVersion
                             )
                         }
                         .buttonStyle(.plain)
@@ -710,8 +716,40 @@ struct SkillDetailView: View {
                 self.clips = c
                 self.attachments = a
             }
+            // Lazy backfill: generate cycling strips for any video
+            // attachments that don't have one yet (imported before the
+            // strip feature shipped, or received via MC blob sync).
+            await backfillStrips(for: a)
         } catch {
             print("detail reload failed: \(error)")
+        }
+    }
+
+    // Best-effort: walk video attachments, generate the cycling-preview
+    // strip for any that's missing one. Sequential so we don't fire N
+    // AVAssetImageGenerators against the same disk at once; per-success
+    // stripVersion bump so each video starts cycling as soon as its
+    // strip lands rather than waiting for the slowest one in the batch.
+    private func backfillStrips(for atts: [Attachment]) async {
+        let importer = AttachmentImporter(assets: assets, store: store)
+        let thumbsRoot = await assets.thumbsRoot
+        for att in atts where att.mediaType == .video {
+            let firstFrame = thumbsRoot
+                .appendingPathComponent("\(att.contentHash)-strip", isDirectory: true)
+                .appendingPathComponent("0.jpg")
+            if FileManager.default.fileExists(atPath: firstFrame.path) { continue }
+            guard let url = try? await assets.url(for: att.contentHash) else {
+                continue
+            }
+            do {
+                try await importer.writeVideoStrip(
+                    sourceURL: url, hash: att.contentHash
+                )
+                await MainActor.run { stripVersion &+= 1 }
+            } catch {
+                // Best-effort; tile keeps falling back to the static
+                // thumbnail. No user-facing surface for this.
+            }
         }
     }
 
