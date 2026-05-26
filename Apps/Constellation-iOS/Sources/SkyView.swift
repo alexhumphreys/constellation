@@ -21,6 +21,21 @@ enum InitialFocus: Equatable {
     case area(AreaID)
 }
 
+// A request from the parent to recenter the canvas on a particular
+// skill. preserveScale=true skips the "snap zoom up to at least 1.0"
+// step that AddSheet/Search rely on — used for tap-driven recenters
+// where the user already sees the star and shouldn't see the camera
+// scale-jump on top of the translate.
+struct FocusRequest: Equatable {
+    let skillId: SkillID
+    let preserveScale: Bool
+
+    init(skillId: SkillID, preserveScale: Bool = false) {
+        self.skillId = skillId
+        self.preserveScale = preserveScale
+    }
+}
+
 struct SkyView: View {
     let skills: [Skill]
     let areas: [Area]
@@ -36,7 +51,7 @@ struct SkyView: View {
     // parent ask the canvas to recenter on a target after a state change
     // (e.g. focusing a freshly-added skill so it doesn't get lost at
     // whatever zoom the user was at).
-    @Binding var focusSkillId: SkillID?
+    @Binding var focusRequest: FocusRequest?
     let onAdd: () -> Void
     // Fraction of viewport height to use as the target vertical center
     // when focusing on a skill. 0.5 = dead center. iPhone passes 0.25
@@ -52,7 +67,7 @@ struct SkyView: View {
         store: Store,
         onMutation: @escaping () -> Void,
         selectedSkillId: Binding<SkillID?>,
-        focusSkillId: Binding<SkillID?> = .constant(nil),
+        focusRequest: Binding<FocusRequest?> = .constant(nil),
         focusVerticalBias: CGFloat = 0.5,
         onAdd: @escaping () -> Void = {}
     ) {
@@ -63,7 +78,7 @@ struct SkyView: View {
         self.store = store
         self.onMutation = onMutation
         self._selectedSkillId = selectedSkillId
-        self._focusSkillId = focusSkillId
+        self._focusRequest = focusRequest
         self.focusVerticalBias = focusVerticalBias
         self.onAdd = onAdd
     }
@@ -497,11 +512,11 @@ struct SkyView: View {
             .onChange(of: skills.count) { _, _ in
                 fitIfNeeded(into: geo.size)
                 // Retry a pending focus once the new skill lands in
-                // `skills` — the parent often sets focusSkillId in the
+                // `skills` — the parent often sets focusRequest in the
                 // same tick as it bumps the reload token, so the first
                 // attempt below misses (the new skill isn't here yet).
-                if let id = focusSkillId {
-                    tryFocusOnSkill(id: id, into: geo.size)
+                if let req = focusRequest {
+                    tryFocusOnSkill(req, into: geo.size)
                 }
             }
             // External pan/zoom request: focus on a target skill, then
@@ -511,9 +526,9 @@ struct SkyView: View {
             // If the skill isn't in the slice yet (parent reload in
             // flight), leave the binding set — the .onChange(of:
             // skills.count) above will retry once it arrives.
-            .onChange(of: focusSkillId) { _, newValue in
-                guard let id = newValue else { return }
-                tryFocusOnSkill(id: id, into: geo.size)
+            .onChange(of: focusRequest) { _, newValue in
+                guard let req = newValue else { return }
+                tryFocusOnSkill(req, into: geo.size)
             }
         }
     }
@@ -670,9 +685,16 @@ struct SkyView: View {
     // produced this skill propagates down. Clearing the binding here
     // (rather than at the call site) ensures we only clear once the
     // animation actually ran.
-    private func tryFocusOnSkill(id: SkillID, into size: CGSize) {
-        guard let skill = skills.first(where: { $0.id == id }) else { return }
-        let s = max(CGFloat(1.0), scale).zoomClamped(to: zoomBounds)
+    private func tryFocusOnSkill(_ request: FocusRequest, into size: CGSize) {
+        guard let skill = skills.first(where: { $0.id == request.skillId }) else { return }
+        // preserveScale=true: tap-driven recenter where the user already
+        // sees the star — only translate, don't surprise them with a
+        // scale change. Otherwise (AddSheet/Search) ensure zoom is at
+        // least 1.0 so the focused star is readable even if the user
+        // was previously zoomed all the way out.
+        let s = request.preserveScale
+            ? scale
+            : max(CGFloat(1.0), scale).zoomClamped(to: zoomBounds)
         withAnimation(.easeInOut(duration: 0.3)) {
             scale = s
             offset = CGSize(
@@ -680,7 +702,7 @@ struct SkyView: View {
                 height: size.height * focusVerticalBias - CGFloat(skill.y) * s
             )
         }
-        focusSkillId = nil
+        focusRequest = nil
     }
 
     private func fitToBox(_ box: CGRect, padding: CGFloat, into size: CGSize) {

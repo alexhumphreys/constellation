@@ -23,7 +23,7 @@ struct RootView: View {
     // primarily right after adding a new one so it doesn't drop at the
     // area center and immediately get lost behind existing stars. SkyView
     // clears the binding once the focus animation kicks off.
-    @State private var pendingFocusSkillId: SkillID? = nil
+    @State private var pendingFocusRequest: FocusRequest? = nil
     // Snapshot share sheet (export → AirDrop). URL is set after the
     // background JSON write finishes; presentation is bound to its
     // presence so the sheet only opens once the file actually exists.
@@ -75,13 +75,19 @@ struct RootView: View {
             if newValue != chainSkillId { chainSkillId = nil }
             // On iPhone, the inspector covers the bottom half of the
             // canvas — pan the newly-selected star into the visible
-            // upper half. Skip if pendingFocusSkillId is already set
-            // (AddSheet / SearchSheet already queued a focus and we
-            // don't want to fight them).
+            // upper half. preserveScale=true so a tap doesn't snap
+            // zoom on top of the translate; only the translation
+            // matters here since the user already sees the star.
+            // Skip if pendingFocusRequest is already set (AddSheet /
+            // SearchSheet already queued a focus and we don't want
+            // to fight them).
             if sizeClass == .compact,
                let newValue,
-               pendingFocusSkillId == nil {
-                pendingFocusSkillId = newValue
+               pendingFocusRequest == nil {
+                pendingFocusRequest = FocusRequest(
+                    skillId: newValue,
+                    preserveScale: true
+                )
             }
         }
         .sheet(isPresented: Binding(
@@ -286,7 +292,7 @@ struct RootView: View {
             store: context.store,
             onMutation: { reloadToken &+= 1 },
             selectedSkillId: $selectedSkillId,
-            focusSkillId: $pendingFocusSkillId,
+            focusRequest: $pendingFocusRequest,
             // iPhone's medium-detent inspector covers the bottom ~half
             // of the canvas; aim focus animations at the upper-half
             // centroid so the focused star isn't hidden by the sheet.
@@ -337,7 +343,7 @@ struct RootView: View {
                 // skills" (they drop at the area center and otherwise
                 // disappear behind whatever's at that spot).
                 if let skillId {
-                    pendingFocusSkillId = skillId
+                    pendingFocusRequest = FocusRequest(skillId: skillId)
                     selectedSkillId = skillId
                 }
             }
@@ -360,7 +366,7 @@ struct RootView: View {
     // (search doesn't mutate state).
     private func focusOnSearchResult(_ skill: Skill) {
         activeHobbies.insert(skill.areaId)
-        pendingFocusSkillId = skill.id
+        pendingFocusRequest = FocusRequest(skillId: skill.id)
         selectedSkillId = skill.id
     }
 
