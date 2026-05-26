@@ -11,6 +11,13 @@ struct RootView: View {
 
     @State private var areas: [Area] = []
     @State private var skills: [Skill] = []
+    // Per-skill latest-attachment hash, used by SkyView to render cover
+    // moons. Derived from store.allAttachments() during reload.
+    @State private var coverHashesBySkillId: [SkillID: String] = [:]
+    // Long-lived in-memory thumbnail cache. Created once per RootView
+    // instance so a reload doesn't drop already-decoded UIImages on the
+    // floor and re-load them from disk.
+    @State private var coverCache = CoverCache()
     @State private var activeHobbies: Set<AreaID> = []
     @State private var selectedSkillId: SkillID? = nil
     // Target of an active backward-chain overlay (nil = no trace).
@@ -313,6 +320,8 @@ struct RootView: View {
             initialFocus: initialFocus,
             chainSkillIds: chainSkillIds,
             chainHighlightOpacity: chainOpacity,
+            coverHashesBySkillId: coverHashesBySkillId,
+            coverCache: coverCache,
             store: context.store,
             onMutation: { reloadToken &+= 1 },
             selectedSkillId: $selectedSkillId,
@@ -539,13 +548,29 @@ struct RootView: View {
         do {
             let fetchedAreas = try await context.store.allAreas()
             let fetchedSkills = try await context.store.skills()
+            let fetchedAttachments = try await context.store.allAttachments()
+            // Latest attachment per skill (allAttachments is ordered
+            // newest-first, so first hit per skillId wins). Becomes
+            // SkyView's coverHashesBySkillId — drives the moon
+            // thumbnails on canvas zoom-in.
+            var covers: [SkillID: String] = [:]
+            for a in fetchedAttachments where covers[a.skillId] == nil {
+                covers[a.skillId] = a.contentHash
+            }
+            let coverHashes = Set(covers.values)
             await MainActor.run {
                 self.areas = fetchedAreas
                 self.skills = fetchedSkills
+                self.coverHashesBySkillId = covers
                 if self.activeHobbies.isEmpty {
                     self.activeHobbies = Set(fetchedAreas.map(\.id))
                 }
             }
+            // Prefetch any new thumbnails into the in-memory cache, and
+            // drop any that are no longer referenced — keeps the cache
+            // bounded as attachments come and go.
+            await coverCache.prefetch(hashes: coverHashes, from: context.assets)
+            await coverCache.evict(except: coverHashes)
         } catch {
             // Failure to refresh shouldn't crash the canvas — leave the
             // last good state on screen. A future toast could surface

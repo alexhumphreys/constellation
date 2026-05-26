@@ -49,6 +49,12 @@ struct SkyView: View {
     // through). The parent uses this to fade the trace out smoothly
     // on canvas gestures instead of dropping it instantly.
     let chainHighlightOpacity: Double
+    // Per-skill content hash of the attachment to render as a moon
+    // thumbnail next to the star. Latest attachment per skill. Skills
+    // without attachments are absent from the dict. Mapped to a UIImage
+    // via coverCache below.
+    let coverHashesBySkillId: [SkillID: String]
+    let coverCache: CoverCache
     let store: Store
     let onMutation: () -> Void
     // Fired on the first tick of any user-driven pan/pinch on the
@@ -74,6 +80,8 @@ struct SkyView: View {
         initialFocus: InitialFocus = .all,
         chainSkillIds: Set<SkillID> = [],
         chainHighlightOpacity: Double = 1.0,
+        coverHashesBySkillId: [SkillID: String] = [:],
+        coverCache: CoverCache,
         store: Store,
         onMutation: @escaping () -> Void,
         selectedSkillId: Binding<SkillID?>,
@@ -86,6 +94,8 @@ struct SkyView: View {
         self.initialFocus = initialFocus
         self.chainSkillIds = chainSkillIds
         self.chainHighlightOpacity = chainHighlightOpacity
+        self.coverHashesBySkillId = coverHashesBySkillId
+        self.coverCache = coverCache
         self.store = store
         self.onMutation = onMutation
         self._selectedSkillId = selectedSkillId
@@ -349,6 +359,66 @@ struct SkyView: View {
                             Path(ellipseIn: rect2),
                             with: .color(Theme.Sky.star.opacity(0.5)),
                             style: StrokeStyle(lineWidth: 0.6, dash: [2, 3])
+                        )
+                    }
+                }
+
+                // Cover moons. A small (40pt) thumbnail of the skill's
+                // latest attachment, positioned upper-right of the star
+                // — like a moon next to a planet. Fades in across zoom
+                // 1.2 → 1.6 so the canvas doesn't pop when the user
+                // pinches past the threshold. Fixed screen-size (not
+                // scaled with zoom) so the canvas doesn't become
+                // wall-of-photos at high zoom. Skills without a cover
+                // (or whose thumbnail hasn't loaded yet) are skipped.
+                let coverAlpha = max(0, min(1, (transform.scale - 1.2) / 0.4))
+                if coverAlpha > 0 {
+                    let moonSize: CGFloat = 40
+                    let moonOffsetX: CGFloat = 22
+                    let moonOffsetY: CGFloat = -22
+                    let cornerRadius: CGFloat = 6
+                    for skill in skills {
+                        guard let hash = coverHashesBySkillId[skill.id],
+                              let uiImage = coverCache.image(for: hash)
+                        else { continue }
+                        let w = worldPosition(of: skill)
+                        let p = transform.apply(w.x, w.y)
+                        let rect = CGRect(
+                            x: p.x + moonOffsetX - moonSize / 2,
+                            y: p.y + moonOffsetY - moonSize / 2,
+                            width: moonSize, height: moonSize
+                        )
+                        // Aspect-fill: compute a draw rect that fully
+                        // covers the square; the clip layer below crops
+                        // anything overhanging the corners.
+                        let imgSize = uiImage.size
+                        let aspect = imgSize.width / max(imgSize.height, 1)
+                        let drawRect: CGRect
+                        if aspect >= 1 {
+                            let w = moonSize * aspect
+                            drawRect = CGRect(
+                                x: rect.midX - w / 2,
+                                y: rect.minY,
+                                width: w, height: moonSize
+                            )
+                        } else {
+                            let h = moonSize / aspect
+                            drawRect = CGRect(
+                                x: rect.minX,
+                                y: rect.midY - h / 2,
+                                width: moonSize, height: h
+                            )
+                        }
+                        let resolved = context.resolve(Image(uiImage: uiImage))
+                        context.drawLayer { layer in
+                            layer.opacity = coverAlpha
+                            layer.clip(to: Path(roundedRect: rect, cornerRadius: cornerRadius))
+                            layer.draw(resolved, in: drawRect)
+                        }
+                        context.stroke(
+                            Path(roundedRect: rect, cornerRadius: cornerRadius),
+                            with: .color(.white.opacity(0.22 * coverAlpha)),
+                            lineWidth: 0.6
                         )
                     }
                 }

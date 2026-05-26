@@ -376,6 +376,20 @@ public actor Store {
         }
     }
 
+    // Every live (non-tombstoned) attachment across all skills, newest
+    // first by added_at. Used by the iOS canvas to derive each skill's
+    // cover image (latest attachment) without having to call
+    // `attachments(for:)` once per skill.
+    public func allAttachments() throws -> [Attachment] {
+        try writer.read { db in
+            try AttachmentRow
+                .order(Column("added_at").desc)
+                .fetchAll(db)
+                .map { $0.toModel() }
+                .filter { !$0.isDeleted }
+        }
+    }
+
     public func attachment(_ id: AttachmentID) throws -> Attachment? {
         try writer.read { db in
             try AttachmentRow.fetchOne(db, key: id.rawValue)?.toModel()
