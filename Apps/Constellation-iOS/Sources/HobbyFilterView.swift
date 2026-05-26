@@ -10,7 +10,6 @@ struct HobbyFilterView: View {
     let areas: [Area]
     @Binding var active: Set<AreaID>
     let skillCount: Int
-    let onAdd: () -> Void
     let onShare: () -> Void
     // Long-press on a chip → contextMenu → "Edit hobby" hands the area
     // off to RootView, which opens EditHobbySheet. Kept as a callback
@@ -50,13 +49,6 @@ struct HobbyFilterView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Share snapshot via AirDrop")
-                Button(action: onAdd) {
-                    Image(systemName: "plus.circle.fill")
-                        .font(.system(size: 18))
-                        .foregroundStyle(.white.opacity(0.75))
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Add skill or hobby")
             }
             Text("\(skillCount) stars · \(areas.count) hobbies")
                 .font(.system(size: 16, design: .serif))

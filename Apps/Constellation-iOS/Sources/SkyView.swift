@@ -62,7 +62,6 @@ struct SkyView: View {
     // (e.g. focusing a freshly-added skill so it doesn't get lost at
     // whatever zoom the user was at).
     @Binding var focusRequest: FocusRequest?
-    let onAdd: () -> Void
     // Fraction of viewport height to use as the target vertical center
     // when focusing on a skill. 0.5 = dead center. iPhone passes 0.25
     // so the focused star lands in the upper half — the part not
@@ -80,8 +79,7 @@ struct SkyView: View {
         selectedSkillId: Binding<SkillID?>,
         focusRequest: Binding<FocusRequest?> = .constant(nil),
         focusVerticalBias: CGFloat = 0.5,
-        onCanvasGesture: @escaping () -> Void = {},
-        onAdd: @escaping () -> Void = {}
+        onCanvasGesture: @escaping () -> Void = {}
     ) {
         self.skills = skills
         self.areas = areas
@@ -94,7 +92,6 @@ struct SkyView: View {
         self._focusRequest = focusRequest
         self.focusVerticalBias = focusVerticalBias
         self.onCanvasGesture = onCanvasGesture
-        self.onAdd = onAdd
     }
 
     // Canvas transform. Mutated directly by CanvasGestureSurface as
@@ -515,9 +512,6 @@ struct SkyView: View {
             .overlay(alignment: .bottomTrailing) {
                 resetButton(into: geo.size)
             }
-            .overlay(alignment: .bottomLeading) {
-                addButton
-            }
             .onAppear { fitIfNeeded(into: geo.size) }
             .onChange(of: geo.size) { _, newSize in
                 fitIfNeeded(into: newSize)
@@ -668,30 +662,6 @@ struct SkyView: View {
         .buttonStyle(.plain)
         .accessibilityLabel("Reset view")
         .padding(.trailing, 16)
-        .padding(.bottom, 24)
-    }
-
-    // Bottom-leading floating "+" mirroring the reset button's style —
-    // primary on-canvas affordance for adding skills/hobbies. The same
-    // action lives in HobbyFilterView's header but reads as decorative
-    // (Alex called it "very hidden"), so this is the discoverable one.
-    @ViewBuilder
-    private var addButton: some View {
-        Button(action: onAdd) {
-            Image(systemName: "plus")
-                .font(.system(size: 20, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.85))
-                .frame(width: 48, height: 48)
-                .background(
-                    Circle()
-                        .fill(.black.opacity(0.30))
-                        .background(Circle().fill(.ultraThinMaterial))
-                        .overlay(Circle().stroke(.white.opacity(0.10), lineWidth: 1))
-                )
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Add skill or hobby")
-        .padding(.leading, 16)
         .padding(.bottom, 24)
     }
 

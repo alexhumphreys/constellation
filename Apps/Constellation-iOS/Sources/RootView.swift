@@ -196,17 +196,19 @@ struct RootView: View {
     private var padLayout: some View {
         ZStack(alignment: .topLeading) {
             canvas
-            HobbyFilterView(
-                areas: areas,
-                active: $activeHobbies,
-                skillCount: visibleSkills.count,
-                onAdd: { showAddSheet = true },
-                onShare: { Task { await prepareExport() } },
-                onEdit: { editingArea = $0 },
-                onSearch: { showSearchSheet = true },
-                syncStatus: context.peerSync.status,
-                onSyncTap: { showSyncSheet = true }
-            )
+            VStack(alignment: .leading, spacing: 12) {
+                HobbyFilterView(
+                    areas: areas,
+                    active: $activeHobbies,
+                    skillCount: visibleSkills.count,
+                    onShare: { Task { await prepareExport() } },
+                    onEdit: { editingArea = $0 },
+                    onSearch: { showSearchSheet = true },
+                    syncStatus: context.peerSync.status,
+                    onSyncTap: { showSyncSheet = true }
+                )
+                addCanvasButton
+            }
             .padding(.top, 12)
             .padding(.leading, 16)
         }
@@ -246,17 +248,19 @@ struct RootView: View {
     private var phoneLayout: some View {
         ZStack(alignment: .topLeading) {
             canvas
-            HobbyFilterView(
-                areas: areas,
-                active: $activeHobbies,
-                skillCount: visibleSkills.count,
-                onAdd: { showAddSheet = true },
-                onShare: { Task { await prepareExport() } },
-                onEdit: { editingArea = $0 },
-                onSearch: { showSearchSheet = true },
-                syncStatus: context.peerSync.status,
-                onSyncTap: { showSyncSheet = true }
-            )
+            VStack(alignment: .leading, spacing: 12) {
+                HobbyFilterView(
+                    areas: areas,
+                    active: $activeHobbies,
+                    skillCount: visibleSkills.count,
+                    onShare: { Task { await prepareExport() } },
+                    onEdit: { editingArea = $0 },
+                    onSearch: { showSearchSheet = true },
+                    syncStatus: context.peerSync.status,
+                    onSyncTap: { showSyncSheet = true }
+                )
+                addCanvasButton
+            }
             .padding(.top, 12)
             .padding(.leading, 12)
         }
@@ -324,9 +328,30 @@ struct RootView: View {
             // until the fade completes so the chainSkillIds set
             // stays non-empty and the gold overlay can interpolate
             // its alpha down to zero.
-            onCanvasGesture: { startChainFadeOut() },
-            onAdd: { showAddSheet = true }
+            onCanvasGesture: { startChainFadeOut() }
         )
+    }
+
+    // Floating "+" button rendered below HobbyFilterView at top-leading.
+    // Same glass/stroke styling as the canvas's reset-view button.
+    // Primary on-canvas affordance for adding skills/hobbies; replaced
+    // the header `+` in HobbyFilterView (too hidden) and the bottom-
+    // leading version that lived in SkyView before 2026-05-27.
+    private var addCanvasButton: some View {
+        Button(action: { showAddSheet = true }) {
+            Image(systemName: "plus")
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.85))
+                .frame(width: 44, height: 44)
+                .background(
+                    Circle()
+                        .fill(.black.opacity(0.30))
+                        .background(Circle().fill(.ultraThinMaterial))
+                        .overlay(Circle().stroke(.white.opacity(0.10), lineWidth: 1))
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Add skill or hobby")
     }
 
     // Resolved BFS backward chain for the active target, materialised as
