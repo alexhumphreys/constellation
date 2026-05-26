@@ -256,6 +256,12 @@ struct RootView: View {
                 )
                 .presentationDetents([.medium, .large])
                 .presentationBackground(Theme.Sky.bg2)
+                // Let pan/zoom on the canvas keep working while the
+                // inspector is parked at .medium — otherwise the user
+                // has to dismiss the sheet to look at a neighbouring
+                // star. At .large the sheet covers the canvas anyway,
+                // so background interaction is moot.
+                .presentationBackgroundInteraction(.enabled(upThrough: .medium))
                 .preferredColorScheme(.dark)
             }
         }
