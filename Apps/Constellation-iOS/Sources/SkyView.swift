@@ -38,6 +38,11 @@ struct SkyView: View {
     // whatever zoom the user was at).
     @Binding var focusSkillId: SkillID?
     let onAdd: () -> Void
+    // Fraction of viewport height to use as the target vertical center
+    // when focusing on a skill. 0.5 = dead center. iPhone passes 0.25
+    // so the focused star lands in the upper half — the part not
+    // covered by the medium-detent inspector sheet.
+    let focusVerticalBias: CGFloat
 
     init(
         skills: [Skill],
@@ -48,6 +53,7 @@ struct SkyView: View {
         onMutation: @escaping () -> Void,
         selectedSkillId: Binding<SkillID?>,
         focusSkillId: Binding<SkillID?> = .constant(nil),
+        focusVerticalBias: CGFloat = 0.5,
         onAdd: @escaping () -> Void = {}
     ) {
         self.skills = skills
@@ -58,6 +64,7 @@ struct SkyView: View {
         self.onMutation = onMutation
         self._selectedSkillId = selectedSkillId
         self._focusSkillId = focusSkillId
+        self.focusVerticalBias = focusVerticalBias
         self.onAdd = onAdd
     }
 
@@ -670,7 +677,7 @@ struct SkyView: View {
             scale = s
             offset = CGSize(
                 width: size.width / 2 - CGFloat(skill.x) * s,
-                height: size.height / 2 - CGFloat(skill.y) * s
+                height: size.height * focusVerticalBias - CGFloat(skill.y) * s
             )
         }
         focusSkillId = nil

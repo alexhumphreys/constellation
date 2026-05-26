@@ -73,6 +73,16 @@ struct RootView: View {
         // unrelated inspector is just visual noise.
         .onChange(of: selectedSkillId) { _, newValue in
             if newValue != chainSkillId { chainSkillId = nil }
+            // On iPhone, the inspector covers the bottom half of the
+            // canvas — pan the newly-selected star into the visible
+            // upper half. Skip if pendingFocusSkillId is already set
+            // (AddSheet / SearchSheet already queued a focus and we
+            // don't want to fight them).
+            if sizeClass == .compact,
+               let newValue,
+               pendingFocusSkillId == nil {
+                pendingFocusSkillId = newValue
+            }
         }
         .sheet(isPresented: Binding(
             get: { exportURL != nil },
@@ -277,6 +287,10 @@ struct RootView: View {
             onMutation: { reloadToken &+= 1 },
             selectedSkillId: $selectedSkillId,
             focusSkillId: $pendingFocusSkillId,
+            // iPhone's medium-detent inspector covers the bottom ~half
+            // of the canvas; aim focus animations at the upper-half
+            // centroid so the focused star isn't hidden by the sheet.
+            focusVerticalBias: sizeClass == .compact ? 0.25 : 0.5,
             onAdd: { showAddSheet = true }
         )
     }
