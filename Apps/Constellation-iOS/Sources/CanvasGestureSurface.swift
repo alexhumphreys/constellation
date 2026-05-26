@@ -67,6 +67,7 @@ struct CanvasGestureSurface: UIViewRepresentable {
         // or pinch starts, which is what we want — taps shouldn't
         // fire when the user is dragging.
         view.addGestureRecognizer(tap)
+        context.coordinator.tap = tap
 
         let longPress = UILongPressGestureRecognizer(
             target: context.coordinator,
@@ -114,6 +115,7 @@ struct CanvasGestureSurface: UIViewRepresentable {
         // canvas underneath the star at the same time.
         weak var longPress: UILongPressGestureRecognizer?
         weak var pan: UIPanGestureRecognizer?
+        weak var tap: UITapGestureRecognizer?
         private var draggingActive: Bool = false
         private var autoPanLink: CADisplayLink?
         // Most recent finger location in view coords, refreshed each
@@ -228,6 +230,15 @@ struct CanvasGestureSurface: UIViewRepresentable {
                     lastDragLocation = loc
                     hostView = g.view
                     startAutoPanIfNeeded()
+                    // Cancel any in-flight tap on the same touches.
+                    // Otherwise a drag that ends within UITap's
+                    // allowableMovement (~10pt) lets tap fire on
+                    // touch lift alongside the drag's .ended, which
+                    // re-opens the inspector for the star we just
+                    // moved — the "moving a star sometimes opens it"
+                    // leak.
+                    tap?.isEnabled = false
+                    tap?.isEnabled = true
                 } else {
                     g.isEnabled = false
                     g.isEnabled = true
