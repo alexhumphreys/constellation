@@ -45,6 +45,11 @@ struct AddSheet: View {
     @State private var saving: Bool = false
     @State private var errorMessage: String? = nil
 
+    // Remembers the last hobby a skill was saved into, so the next
+    // AddSheet open pre-selects it. Stored as the raw id string because
+    // @AppStorage doesn't take typed wrappers.
+    @AppStorage("AddSheet.lastSkillAreaId") private var lastSkillAreaIdRaw: String = ""
+
     var body: some View {
         NavigationStack {
             Form {
@@ -86,9 +91,17 @@ struct AddSheet: View {
             }
             .preferredColorScheme(.dark)
             .onAppear {
-                // Default to the first hobby so the user can save a
-                // skill without touching the picker.
-                if skillAreaId == nil { skillAreaId = areas.first?.id }
+                // Prefer the last hobby the user saved into; fall back
+                // to the first if there's no stored value or the stored
+                // one has since been deleted.
+                if skillAreaId == nil {
+                    if let stored = AreaID(rawValue: lastSkillAreaIdRaw),
+                       areas.contains(where: { $0.id == stored }) {
+                        skillAreaId = stored
+                    } else {
+                        skillAreaId = areas.first?.id
+                    }
+                }
             }
         }
     }
@@ -219,6 +232,7 @@ struct AddSheet: View {
             isFoundation: skillFoundation
         )
         try await store.upsertSkill(skill)
+        lastSkillAreaIdRaw = areaId.rawValue
         return skill
     }
 
