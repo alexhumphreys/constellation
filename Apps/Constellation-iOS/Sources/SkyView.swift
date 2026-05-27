@@ -141,6 +141,12 @@ struct SkyView: View {
     // propagating. Cleared by `.onChange(of: skills)`.
     @State private var positionOverrides: [SkillID: CGPoint] = [:]
 
+    // Frame-ticking task driving the focus pan/zoom animation. Held so a
+    // fresh focus request can pre-empt one already in flight, and the
+    // gesture surface can cancel it the moment the user touches the
+    // canvas (their input should always win over a queued camera move).
+    @State private var focusAnimationTask: Task<Void, Never>? = nil
+
     private let world = CGSize(width: 2400, height: 1600)
     private let zoomBounds: ClosedRange<CGFloat> = 0.15...5.00
 
@@ -623,7 +629,14 @@ struct SkyView: View {
                     onDragEnded: {
                         endDrag()
                     },
-                    onCanvasGestureBegan: onCanvasGesture
+                    onCanvasGestureBegan: {
+                        // User grabbed the canvas — abort any focus pan
+                        // already in flight so they're not fighting a
+                        // queued camera move with their fingers.
+                        focusAnimationTask?.cancel()
+                        focusAnimationTask = nil
+                        onCanvasGesture()
+                    }
                 )
             )
             .overlay(alignment: .bottomTrailing) {
@@ -808,17 +821,58 @@ struct SkyView: View {
         // scale change. Otherwise (AddSheet/Search) ensure zoom is at
         // least 1.0 so the focused star is readable even if the user
         // was previously zoomed all the way out.
-        let s = request.preserveScale
+        let targetScale: CGFloat = request.preserveScale
             ? scale
             : max(CGFloat(1.0), scale).zoomClamped(to: zoomBounds)
-        withAnimation(.easeInOut(duration: 0.3)) {
-            scale = s
-            offset = CGSize(
-                width: size.width / 2 - CGFloat(skill.x) * s,
-                height: size.height * focusVerticalBias - CGFloat(skill.y) * s
-            )
-        }
+        let targetOffset = CGSize(
+            width: size.width / 2 - CGFloat(skill.x) * targetScale,
+            height: size.height * focusVerticalBias - CGFloat(skill.y) * targetScale
+        )
+        animateFocus(toScale: targetScale, toOffset: targetOffset)
         focusRequest = nil
+    }
+
+    // Frame-by-frame lerp of scale + offset. `withAnimation` looks like
+    // the right tool but doesn't work here: SwiftUI's animation system
+    // interpolates animatable view modifiers, not @State reads inside a
+    // Canvas content closure — so a withAnimation block snaps the
+    // transform in a single body re-eval and the camera *jumps* to the
+    // target. (Same constraint that drives startChainFadeOut over in
+    // RootView.) Manual ticking is the only way to actually see the pan.
+    private func animateFocus(toScale targetScale: CGFloat, toOffset targetOffset: CGSize) {
+        focusAnimationTask?.cancel()
+        let startScale = scale
+        let startOffset = offset
+        if startScale == targetScale, startOffset == targetOffset {
+            focusAnimationTask = nil
+            return
+        }
+        let duration: TimeInterval = 0.3
+        let frameInterval: UInt64 = 16_666_667  // ~60Hz, nanoseconds
+        let startTime = Date.now
+        focusAnimationTask = Task { @MainActor in
+            while !Task.isCancelled {
+                let elapsed = Date.now.timeIntervalSince(startTime)
+                if elapsed >= duration {
+                    scale = targetScale
+                    offset = targetOffset
+                    break
+                }
+                let t = elapsed / duration
+                // easeInOut cubic: 3t² - 2t³ — gentle on both ends so
+                // the camera doesn't lurch out of rest or slam into the
+                // target.
+                let eased = CGFloat((3 - 2 * t) * t * t)
+                scale = startScale + (targetScale - startScale) * eased
+                offset = CGSize(
+                    width: startOffset.width + (targetOffset.width - startOffset.width) * eased,
+                    height: startOffset.height + (targetOffset.height - startOffset.height) * eased
+                )
+                try? await Task.sleep(nanoseconds: frameInterval)
+            }
+            if Task.isCancelled { return }
+            focusAnimationTask = nil
+        }
     }
 
     private func fitToBox(_ box: CGRect, padding: CGFloat, into size: CGSize) {
