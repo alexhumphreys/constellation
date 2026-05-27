@@ -142,7 +142,7 @@ struct SkyView: View {
     @State private var positionOverrides: [SkillID: CGPoint] = [:]
 
     private let world = CGSize(width: 2400, height: 1600)
-    private let zoomBounds: ClosedRange<CGFloat> = 0.30...3.00
+    private let zoomBounds: ClosedRange<CGFloat> = 0.15...5.00
 
     var body: some View {
         GeometryReader { geo in
