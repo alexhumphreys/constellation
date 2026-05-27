@@ -263,7 +263,7 @@ public actor Store {
         let existing = try writer.read { db in
             try NoteRow.fetchOne(db, key: note.id.rawValue)?.toModel()
         }
-        let merged = existing.map { CRDT.mergeAppendOnly($0, note) } ?? note
+        let merged = existing.map { CRDT.mergeMutableAppendOnly($0, note) } ?? note
         try writer.write { db in
             try NoteRow(merged).save(db)
             try insertEvent(
@@ -277,6 +277,7 @@ public actor Store {
                         "skill_id": .string(note.skillId.rawValue),
                         "note_id": .string(note.id.rawValue),
                         "text_len": .int(Int64(note.text.count)),
+                        "was_existing": .bool(existing != nil),
                     ]
                 )
             )
@@ -292,6 +293,19 @@ public actor Store {
                 .map { $0.toModel() }
                 .filter { !$0.isDeleted }
         }
+    }
+
+    public func note(_ id: NoteID) throws -> Note? {
+        try writer.read { db in
+            try NoteRow.fetchOne(db, key: id.rawValue)?.toModel()
+        }
+    }
+
+    public func tombstoneNote(_ id: NoteID) throws {
+        guard var n = try self.note(id) else { return }
+        n.tombstonedAt = now()
+        n.updatedAt = now()
+        try upsertNote(n)
     }
 
     // MARK: - Clip

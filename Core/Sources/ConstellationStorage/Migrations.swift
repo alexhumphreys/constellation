@@ -97,6 +97,39 @@ enum Migrations {
             try createAttachmentsTable(db)
         }
 
+        // Promote Note from strict-append-only to LWW-with-tombstones so
+        // users can edit a note in place (fix a typo, refine a coach cue)
+        // and have the edit propagate through the CRDT merge. Same shape
+        // as the Clip v3 migration: backfill `updated_at = added_at` and
+        // recreate the table to enforce NOT NULL.
+        m.registerMigration("v6_note_updated_at") { db in
+            try db.alter(table: "notes") { t in
+                t.add(column: "updated_at", .datetime)
+            }
+            try db.execute(sql: "UPDATE notes SET updated_at = added_at")
+            try db.execute(sql: """
+                CREATE TABLE notes_new (
+                    id TEXT PRIMARY KEY,
+                    skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE RESTRICT,
+                    text TEXT NOT NULL,
+                    added_at DATETIME NOT NULL,
+                    updated_at DATETIME NOT NULL,
+                    tombstoned_at DATETIME
+                )
+            """)
+            try db.execute(sql: """
+                INSERT INTO notes_new SELECT
+                    id, skill_id, text, added_at, updated_at, tombstoned_at
+                FROM notes
+            """)
+            try db.execute(sql: "DROP TABLE notes")
+            try db.execute(sql: "ALTER TABLE notes_new RENAME TO notes")
+            try db.create(
+                index: "idx_notes_skill_added", on: "notes",
+                columns: ["skill_id", "added_at"]
+            )
+        }
+
         return m
     }
 

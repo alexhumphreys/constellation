@@ -183,6 +183,7 @@ struct NoteRow: Codable, FetchableRecord, PersistableRecord {
     var skillId: String
     var text: String
     var addedAt: Date
+    var updatedAt: Date
     var tombstonedAt: Date?
 
     init(_ note: Note) {
@@ -190,6 +191,7 @@ struct NoteRow: Codable, FetchableRecord, PersistableRecord {
         self.skillId = note.skillId.rawValue
         self.text = note.text
         self.addedAt = note.addedAt
+        self.updatedAt = note.updatedAt
         self.tombstonedAt = note.tombstonedAt
     }
 
@@ -199,6 +201,7 @@ struct NoteRow: Codable, FetchableRecord, PersistableRecord {
             skillId: SkillID(skillId),
             text: text,
             addedAt: addedAt,
+            updatedAt: updatedAt,
             tombstonedAt: tombstonedAt
         )
     }

@@ -15,21 +15,20 @@ import Foundation
 //    For this app's interaction pattern (one human, occasionally on two
 //    devices) that's the right trade-off.
 //
-// 2. **Append-only set with tombstones** for Session, Note. Each
-//    item is identified by a UUID generated at creation, so concurrent
+// 2. **Append-only set with tombstones** for Session. Each item is
+//    identified by a UUID generated at creation, so concurrent
 //    creations never conflict. Deletion sets `tombstonedAt`; if either
 //    side has a tombstone, the merged item carries the *earlier*
 //    tombstone (delete-wins, which matches the user's intent when they
 //    delete on one device and then keep using the other offline).
 //
-// 3. **LWW-with-tombstones** for Clip. Same id-on-creation discipline
-//    as #2 plus an `updatedAt` clock that bumps on every edit; the
-//    merge picks the side with the larger `updatedAt` for mutable
-//    body fields and still carries the earliest tombstone. This is
-//    the hybrid that lets clips be edited (add a note after the fact,
-//    fix a wrong URL) without losing CRDT convergence. Sessions and
-//    notes stay strict-append-only because their use case really is
-//    immutable log entries.
+// 3. **LWW-with-tombstones** for Clip, Note, Attachment. Same id-on-
+//    creation discipline as #2 plus an `updatedAt` clock that bumps on
+//    every edit; the merge picks the side with the larger `updatedAt`
+//    for mutable body fields and still carries the earliest tombstone.
+//    Lets a note be edited (fix a typo, refine a coach cue) without
+//    losing CRDT convergence. Sessions stay strict-append-only because
+//    their use case really is immutable log entries.
 //
 // Both strategies are commutative, associative, and idempotent, so
 // they're proper CRDTs — replicas converge regardless of merge order
@@ -73,9 +72,16 @@ public enum CRDT {
         return out
     }
 
-    public static func mergeAppendOnly(_ a: Note, _ b: Note) -> Note {
-        precondition(a.id == b.id, "mergeAppendOnly called on different IDs")
-        var out = a
+    // Note uses the same hybrid as Clip — LWW by `updatedAt` on the
+    // mutable `text`, earliest-tombstone for delete.
+    public static func mergeMutableAppendOnly(_ a: Note, _ b: Note) -> Note {
+        precondition(a.id == b.id, "mergeMutableAppendOnly called on different IDs")
+        var out: Note
+        if a.updatedAt != b.updatedAt {
+            out = a.updatedAt > b.updatedAt ? a : b
+        } else {
+            out = a.id.rawValue >= b.id.rawValue ? a : b
+        }
         out.tombstonedAt = earliestTombstone(a.tombstonedAt, b.tombstonedAt)
         return out
     }
@@ -140,7 +146,9 @@ public struct ConstellationSnapshot: Codable, Sendable, Hashable {
     // v4 → v5: Attachment entity added for device-captured photos and
     // videos. Snapshot ships metadata refs only; bytes are content-
     // addressed in `Documents/assets/<hash>` and transferred out-of-band.
-    public static let currentSchemaVersion: Int = 5
+    // v5 → v6: Note gained `updatedAt` so it can be edited via LWW
+    // merge, mirroring the Clip v2→v3 promotion.
+    public static let currentSchemaVersion: Int = 6
 
     public var schemaVersion: Int
     public var generatedAt: Date
@@ -190,7 +198,7 @@ public struct ConstellationSnapshot: Codable, Sendable, Hashable {
             sessions: mergeById(
                 a.sessions, b.sessions, key: \.id, merge: CRDT.mergeAppendOnly
             ),
-            notes: mergeById(a.notes, b.notes, key: \.id, merge: CRDT.mergeAppendOnly),
+            notes: mergeById(a.notes, b.notes, key: \.id, merge: CRDT.mergeMutableAppendOnly),
             clips: mergeById(a.clips, b.clips, key: \.id, merge: CRDT.mergeMutableAppendOnly),
             attachments: mergeById(
                 a.attachments, b.attachments, key: \.id, merge: CRDT.mergeMutableAppendOnly

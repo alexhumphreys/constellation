@@ -99,6 +99,38 @@ struct StoreTests {
         #expect(Set(sessions.map(\.text)) == ["rep 1", "rep 2", "rep 3"])
     }
 
+    @Test("upsertNote edits in place and preserves addedAt")
+    func noteEditInPlace() async throws {
+        let store = try await seededStore()
+        let id = NoteID.generate()
+        let added = Date(timeIntervalSince1970: 1_000)
+        try await store.upsertNote(Note(
+            id: id, skillId: SkillID("crochet"), text: "watch elbow",
+            addedAt: added, updatedAt: added
+        ))
+        try await store.upsertNote(Note(
+            id: id, skillId: SkillID("crochet"),
+            text: "watch elbow on entry",
+            addedAt: added, updatedAt: Date(timeIntervalSince1970: 2_000)
+        ))
+        let notes = try await store.notes(for: SkillID("crochet"))
+        #expect(notes.count == 1)
+        #expect(notes.first?.text == "watch elbow on entry")
+        #expect(notes.first?.addedAt == added)
+    }
+
+    @Test("tombstoneNote hides the note from default query")
+    func tombstoneNoteHides() async throws {
+        let store = try await seededStore()
+        let id = NoteID.generate()
+        try await store.upsertNote(
+            Note(id: id, skillId: SkillID("crochet"), text: "scary on left")
+        )
+        try await store.tombstoneNote(id)
+        let notes = try await store.notes(for: SkillID("crochet"))
+        #expect(notes.isEmpty)
+    }
+
     @Test("Snapshot + merge round-trips identically")
     func snapshotRoundtrip() async throws {
         let storeA = try await seededStore()
@@ -228,5 +260,39 @@ struct CRDTPureTests {
                            tombstonedAt: Date(timeIntervalSince1970: 100))
         let merged = CRDT.mergeAppendOnly(live, dead)
         #expect(merged.isDeleted)
+    }
+
+    @Test("Note edit wins by later updatedAt")
+    func noteLWW() {
+        let id = NoteID("n1")
+        let original = Note(
+            id: id, skillId: SkillID("x"), text: "first draft",
+            addedAt: Date(timeIntervalSince1970: 1_000),
+            updatedAt: Date(timeIntervalSince1970: 1_000)
+        )
+        let edited = Note(
+            id: id, skillId: SkillID("x"), text: "polished",
+            addedAt: Date(timeIntervalSince1970: 1_000),
+            updatedAt: Date(timeIntervalSince1970: 2_000)
+        )
+        #expect(CRDT.mergeMutableAppendOnly(original, edited).text == "polished")
+        #expect(CRDT.mergeMutableAppendOnly(edited, original).text == "polished")
+    }
+
+    @Test("Note tombstone wins over later edit")
+    func noteTombstoneWins() {
+        let id = NoteID("n1")
+        let live = Note(
+            id: id, skillId: SkillID("x"), text: "alive",
+            updatedAt: Date(timeIntervalSince1970: 2_000)
+        )
+        let dead = Note(
+            id: id, skillId: SkillID("x"), text: "dead",
+            updatedAt: Date(timeIntervalSince1970: 1_000),
+            tombstonedAt: Date(timeIntervalSince1970: 1_500)
+        )
+        // LWW picks `live`'s text, but earliest-tombstone still applies.
+        #expect(CRDT.mergeMutableAppendOnly(live, dead).isDeleted)
+        #expect(CRDT.mergeMutableAppendOnly(dead, live).isDeleted)
     }
 }

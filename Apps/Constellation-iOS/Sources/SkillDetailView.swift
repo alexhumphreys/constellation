@@ -62,6 +62,9 @@ struct SkillDetailView: View {
     @State private var showClipSheet: Bool = false
     @State private var editingClip: Clip? = nil
     @State private var showEditSheet: Bool = false
+    // Drives the EditNoteSheet. sheet(item:) handles dismissal, so we
+    // don't need a separate boolean.
+    @State private var editingNote: Note? = nil
     // Attachment sheet state — picker on `showAttachmentPicker`,
     // fullscreen viewer on a non-nil `viewingAttachment`. `importing`
     // gates the ADD button while PHPicker results are being re-encoded
@@ -154,6 +157,18 @@ struct SkillDetailView: View {
                 Task { await importPicked(results) }
             }
             .ignoresSafeArea()
+        }
+        .sheet(item: $editingNote) { n in
+            EditNoteSheet(
+                note: n,
+                store: store,
+                onClose: { editingNote = nil },
+                onSaved: {
+                    editingNote = nil
+                    Task { await reload() }
+                    onMutation()
+                }
+            )
         }
         .sheet(item: $viewingAttachment) { att in
             AttachmentViewerSheet(
@@ -671,18 +686,37 @@ struct SkillDetailView: View {
         let area = self.area
         return section("NOTES") {
             ForEach(notes, id: \.id) { n in
-                HStack(alignment: .top, spacing: 0) {
-                    Rectangle()
-                        .fill(area?.color ?? .gray)
-                        .frame(width: 2)
-                    Text(n.text)
-                        .font(.system(size: 15, design: .serif))
-                        .foregroundStyle(.white.opacity(0.82))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 8)
+                Button {
+                    editingNote = n
+                } label: {
+                    HStack(alignment: .top, spacing: 0) {
+                        Rectangle()
+                            .fill(area?.color ?? .gray)
+                            .frame(width: 2)
+                        Text(n.text)
+                            .font(.system(size: 15, design: .serif))
+                            .foregroundStyle(.white.opacity(0.82))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .multilineTextAlignment(.leading)
+                    }
+                    .background(.white.opacity(0.02))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
                 }
-                .background(.white.opacity(0.02))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .buttonStyle(.plain)
+                .contextMenu {
+                    Button {
+                        editingNote = n
+                    } label: {
+                        Label("Edit note", systemImage: "pencil")
+                    }
+                    Button(role: .destructive) {
+                        Task { await tombstoneNote(n) }
+                    } label: {
+                        Label("Delete note", systemImage: "trash")
+                    }
+                }
             }
             HStack {
                 TextField("Add a note…", text: $draftNote, axis: .vertical)
@@ -776,6 +810,19 @@ struct SkillDetailView: View {
             onMutation()
         } catch {
             print("session log failed: \(error)")
+        }
+    }
+
+    // Context-menu Delete bypasses the EditNoteSheet's confirmation
+    // dialog. Tombstones via the store; reload pulls the row out of the
+    // visible list.
+    private func tombstoneNote(_ note: Note) async {
+        do {
+            try await store.tombstoneNote(note.id)
+            await reload()
+            onMutation()
+        } catch {
+            print("note delete failed: \(error)")
         }
     }
 
