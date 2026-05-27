@@ -124,25 +124,22 @@ struct SkyView: View {
 
     @State private var didFit: Bool = false
 
-    // Drag-to-move overlay state. While the user is long-press dragging
-    // a star we render at this overridden world position so the canvas
-    // updates at 60fps without round-tripping through the Store. On
-    // drag-end we upsert the skill, trigger a parent reload, and clear
-    // the override on the next tick — by then the persisted x/y is in
-    // `skills` so the star doesn't jump.
-    @State private var draggingSkillId: SkillID? = nil
-    @State private var dragOverride: CGPoint? = nil
+    // Drag state, unified across single + group. `dragBaselines` is
+    // populated while a finger is on the canvas: one entry for a
+    // single-star drag (baseline = anchor world, so baseline + delta
+    // tracks the finger), or one per selected star for a group drag
+    // (baselines preserve relative offsets so the cluster moves
+    // rigidly). Cleared on touch lift.
+    @State private var dragBaselines: [SkillID: CGPoint] = [:]
+    @State private var dragAnchorWorld: CGPoint = .zero
+    @State private var dragDelta: CGSize = .zero
 
-    // Group-drag override. When the user long-presses on a star that's
-    // part of a multi-selection, every selected star moves by the same
-    // world-space delta. `groupBaselines` snapshots each selected
-    // star's pre-drag position so we can recompute overrides each tick
-    // without accumulating floating-point drift, and `groupAnchorWorld`
-    // is the world point where the drag started (the anchor against
-    // which deltas are measured).
-    @State private var groupBaselines: [SkillID: CGPoint] = [:]
-    @State private var groupAnchorWorld: CGPoint = .zero
-    @State private var groupDelta: CGSize = .zero
+    // Committed-but-not-yet-reloaded positions. Set in endDrag right
+    // after the live drag state clears, held through the async upsert
+    // + parent reload so the canvas doesn't flicker back to the stale
+    // `skill.x/y` between the finger lifting and the new data
+    // propagating. Cleared by `.onChange(of: skills)`.
+    @State private var positionOverrides: [SkillID: CGPoint] = [:]
 
     private let world = CGSize(width: 2400, height: 1600)
     private let zoomBounds: ClosedRange<CGFloat> = 0.30...3.00
@@ -652,6 +649,16 @@ struct SkyView: View {
                     tryFocusOnSkill(req, into: geo.size)
                 }
             }
+            // Drop the committed drag overrides once the parent's
+            // reload has propagated new x/y into `skills`. Only fires
+            // when no finger is on the canvas (dragBaselines empty),
+            // so a peer-sync reload mid-drag can't yank the overrides
+            // out from under a live gesture.
+            .onChange(of: skills) { _, _ in
+                if dragBaselines.isEmpty, !positionOverrides.isEmpty {
+                    positionOverrides = [:]
+                }
+            }
             // External pan/zoom request: focus on a target skill, then
             // clear the binding so the same skill can be re-targeted
             // later. Animates so the user sees the canvas move toward
@@ -880,25 +887,30 @@ struct SkyView: View {
 
     // MARK: - Drag-to-move
 
-    // Render-time position: returns the live drag override if this
-    // is the star being dragged, otherwise its persisted (x, y).
+    // Render-time position. Live drag wins (baseline + delta tracks
+    // the finger); falling through, a committed override held from a
+    // recent drag wins over the persisted x/y so the canvas stays at
+    // the drag-end position until the reload propagates. Final
+    // fallback is the model's stored coords.
     private func worldPosition(of skill: Skill) -> CGPoint {
-        if !groupBaselines.isEmpty, let base = groupBaselines[skill.id] {
-            return CGPoint(x: base.x + groupDelta.width,
-                           y: base.y + groupDelta.height)
+        if let base = dragBaselines[skill.id] {
+            return CGPoint(
+                x: base.x + dragDelta.width,
+                y: base.y + dragDelta.height
+            )
         }
-        if let dragOverride, draggingSkillId == skill.id {
-            return dragOverride
+        if let pos = positionOverrides[skill.id] {
+            return pos
         }
         return CGPoint(x: skill.x, y: skill.y)
     }
 
     // True iff the long-press began over a star — that's the signal
     // CanvasGestureSurface uses to suppress pan for the rest of the
-    // gesture. Returning false means "no star here, let normal
-    // recognizers proceed". A long-press on a selected star with the
-    // group set populated promotes to a rigid group-translate; lone
-    // stars fall back to the single-skill drag path.
+    // gesture. A long-press on a selected star with 2+ in the set
+    // promotes to a rigid group-translate (per-star baselines preserve
+    // relative offsets); everything else is a single-star drag where
+    // the baseline = anchor world so the star tracks the finger.
     private func beginDrag(
         at location: CGPoint, transform: CanvasTransform
     ) -> Bool {
@@ -906,102 +918,73 @@ struct SkyView: View {
             return false
         }
         let world = screenToWorld(location)
-        // Group drag wins when the user grabs a selected star while
-        // 2+ are selected. With exactly one selected star (the same
-        // one being dragged), it's indistinguishable from a single
-        // drag, so we fall through to the normal path — cheaper to
-        // upsert one row than to dispatch through the group code.
+        dragAnchorWorld = world
+        dragDelta = .zero
+        // Prefer the still-held positionOverride over the persisted
+        // x/y when seeding the baseline — a re-drag on a star whose
+        // previous commit hasn't been reloaded yet shouldn't snap
+        // back to skill.x/y.
+        func baseline(for id: SkillID, fallback: CGPoint) -> CGPoint {
+            positionOverrides[id] ?? fallback
+        }
         if isSelectMode,
            multiSelectedIds.contains(hit),
            multiSelectedIds.count >= 2 {
             var baselines: [SkillID: CGPoint] = [:]
             for s in skills where multiSelectedIds.contains(s.id) {
-                baselines[s.id] = CGPoint(x: s.x, y: s.y)
+                baselines[s.id] = baseline(
+                    for: s.id, fallback: CGPoint(x: s.x, y: s.y)
+                )
             }
-            groupBaselines = baselines
-            groupAnchorWorld = world
-            groupDelta = .zero
-            return true
+            dragBaselines = baselines
+        } else {
+            // Single drag: baseline = anchor world, so worldPosition
+            // returns world + (current - world) = current finger
+            // coord on every tick. Snaps the star under the finger
+            // immediately (no one-frame visual gap).
+            dragBaselines = [hit: world]
         }
-        draggingSkillId = hit
-        // Initialize the override to the finger location in world
-        // coords so the very first render snaps the star under the
-        // finger (rather than leaving a one-frame visual gap).
-        dragOverride = world
         return true
     }
 
     private func updateDrag(at location: CGPoint) {
+        guard !dragBaselines.isEmpty else { return }
         let world = screenToWorld(location)
-        if !groupBaselines.isEmpty {
-            groupDelta = CGSize(
-                width: world.x - groupAnchorWorld.x,
-                height: world.y - groupAnchorWorld.y
-            )
-            return
-        }
-        guard draggingSkillId != nil else { return }
-        dragOverride = world
+        dragDelta = CGSize(
+            width: world.x - dragAnchorWorld.x,
+            height: world.y - dragAnchorWorld.y
+        )
     }
 
-    // On end, persist via Store.upsertSkill (LWW merge, bumps
-    // updatedAt) and ask the parent to refresh. We clear the override
-    // *after* the refresh has had a chance to land — clearing eagerly
-    // would snap the star back to its old position for one frame.
+    // On finger lift: freeze the resolved positions into
+    // `positionOverrides` so the canvas keeps drawing them at the
+    // drag-end coords while the async upsert + parent reload
+    // propagate. The overrides are cleared by .onChange(of: skills)
+    // once new data lands — that's the only safe moment, because
+    // clearing earlier would re-render against the still-stale
+    // skill.x/y and pop the stars back.
     private func endDrag() {
-        if !groupBaselines.isEmpty {
-            commitGroupDrag()
-            return
-        }
-        guard let id = draggingSkillId, let target = dragOverride else {
-            draggingSkillId = nil
-            dragOverride = nil
-            return
-        }
-        draggingSkillId = nil
-        guard var skill = skills.first(where: { $0.id == id }) else {
-            dragOverride = nil
-            return
-        }
-        skill.x = Double(target.x)
-        skill.y = Double(target.y)
-        skill.updatedAt = Date()
-        Task {
-            do {
-                try await store.upsertSkill(skill)
-                await MainActor.run {
-                    onMutation()
-                    dragOverride = nil
-                }
-            } catch {
-                // Persist failed — drop the override so the canvas
-                // reverts to the last known good position. Throwing
-                // from a UI gesture has no good surface yet; quiet
-                // revert is better than a stuck "off by inches" star.
-                await MainActor.run { dragOverride = nil }
-            }
-        }
-    }
-
-    // Persist one upsert per touched skill (one `skill.upsert` wide
-    // event each — matches the wide-events-as-business-logic pattern).
-    // Stays serial so an inbound MC merge mid-flight can't see a
-    // half-applied group (each upsert lands atomically; the worst case
-    // is the user sees N/2 stars moved while the rest are loading,
-    // never N/2 in the new spot and N/2 in some inconsistent third).
-    private func commitGroupDrag() {
-        let baselines = groupBaselines
-        let delta = groupDelta
-        // Clear visual state at the start; the persisted x/y will
-        // arrive via the parent reload below.
-        groupBaselines = [:]
-        groupAnchorWorld = .zero
-        groupDelta = .zero
+        let baselines = dragBaselines
+        let delta = dragDelta
+        dragBaselines = [:]
+        dragAnchorWorld = .zero
+        dragDelta = .zero
         guard !baselines.isEmpty, delta != .zero else {
+            // No-movement long-press → nothing to commit; star stays
+            // wherever it already was.
             return
         }
-        let now = Date()
+        var finals = positionOverrides
+        for (id, base) in baselines {
+            finals[id] = CGPoint(
+                x: base.x + delta.width,
+                y: base.y + delta.height
+            )
+        }
+        positionOverrides = finals
+
         let bySkillId = Dictionary(uniqueKeysWithValues: skills.map { ($0.id, $0) })
+        let now = Date()
         var updates: [Skill] = []
         for (id, base) in baselines {
             guard var s = bySkillId[id] else { continue }
@@ -1010,6 +993,10 @@ struct SkyView: View {
             s.updatedAt = now
             updates.append(s)
         }
+        // One upsert per touched skill (one `skill.upsert` wide event
+        // each — matches the wide-events-as-business-logic pattern).
+        // Serial so an inbound MC merge mid-flight can't see a
+        // half-applied group.
         Task {
             for s in updates {
                 try? await store.upsertSkill(s)
