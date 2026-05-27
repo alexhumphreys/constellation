@@ -121,6 +121,12 @@ struct SkyView: View {
     // we can apply incrementally.
     @State private var offset: CGSize = .zero
     @State private var scale: CGFloat = 0.5
+    // Pan-only mirror of `offset` used to position the parallax
+    // background. Updated by pan ticks and by programmatic camera
+    // moves (fit / reset / focus animation), but deliberately *not*
+    // updated by pinch — so the dampened-zoom jump during pinches is
+    // gone and the background sits still under a pure scale change.
+    @State private var bgPan: CGSize = .zero
 
     @State private var didFit: Bool = false
 
@@ -166,17 +172,16 @@ struct SkyView: View {
                 )
 
                 // Faint background star field. Deterministic positions
-                // (seeded once) and rendered through a *dampened*
-                // transform — dots only move 40% as much as the
-                // foreground when panning, and 70% as much when
-                // zooming. That mismatch is the parallax cue: a sky
-                // that sits behind the skill graph rather than glued
-                // to it. The seeded region overshoots world bounds by
-                // 50% on each side so the screen stays covered at
-                // extreme pan.
-                let bgScale = Swift.max(0.6, transform.scale * 0.7)
-                let bgOffsetX = transform.offsetX * 0.4
-                let bgOffsetY = transform.offsetY * 0.4
+                // (seeded once) and rendered with a *fixed* scale and a
+                // dampened pan offset — dots don't change size with
+                // zoom (true infinity-distance metaphor) but still
+                // drift at 40% of the foreground when panning, so
+                // depth-on-pan reads while pinches no longer cause the
+                // field to jump. The seeded region overshoots world
+                // bounds so the screen stays covered at extreme pan.
+                let bgScale: CGFloat = 0.7
+                let bgOffsetX = bgPan.width * 0.4
+                let bgOffsetY = bgPan.height * 0.4
                 for dot in Self.bgDots {
                     let px = dot.x * bgScale + bgOffsetX
                     let py = dot.y * bgScale + bgOffsetY
@@ -616,6 +621,7 @@ struct SkyView: View {
                 CanvasGestureSurface(
                     offset: $offset,
                     scale: $scale,
+                    bgPan: $bgPan,
                     zoomBounds: zoomBounds,
                     onTap: { location in
                         handleTap(at: location, in: geo.size, transform: transform)
@@ -770,6 +776,7 @@ struct SkyView: View {
             width: size.width / 2 - centerX * s,
             height: size.height / 2 - centerY * s
         )
+        bgPan = offset
     }
 
     // MARK: - Reset view
@@ -856,6 +863,7 @@ struct SkyView: View {
                 if elapsed >= duration {
                     scale = targetScale
                     offset = targetOffset
+                    bgPan = targetOffset
                     break
                 }
                 let t = elapsed / duration
@@ -868,6 +876,7 @@ struct SkyView: View {
                     width: startOffset.width + (targetOffset.width - startOffset.width) * eased,
                     height: startOffset.height + (targetOffset.height - startOffset.height) * eased
                 )
+                bgPan = offset
                 try? await Task.sleep(nanoseconds: frameInterval)
             }
             if Task.isCancelled { return }
@@ -886,6 +895,7 @@ struct SkyView: View {
             width: size.width / 2 - (box.midX) * s,
             height: size.height / 2 - (box.midY) * s
         )
+        bgPan = offset
     }
 
     // MARK: - Hit testing

@@ -22,6 +22,10 @@ import UIKit
 struct CanvasGestureSurface: UIViewRepresentable {
     @Binding var offset: CGSize
     @Binding var scale: CGFloat
+    // Pan-only mirror of offset. The pan handler updates this alongside
+    // offset; the pinch handler doesn't touch it. SkyView uses it to
+    // position the parallax background so pinches don't slide the sky.
+    @Binding var bgPan: CGSize
     let zoomBounds: ClosedRange<CGFloat>
     let onTap: (CGPoint) -> Void
     // Long-press drag callbacks. began returns true if the hit-test
@@ -155,7 +159,7 @@ struct CanvasGestureSurface: UIViewRepresentable {
             // Same story while a star is being dragged: the long-press
             // handler is what's mutating world state, and we don't
             // want the canvas to slide under it.
-            if pinchActive || draggingActive {
+            if draggingActive {
                 g.setTranslation(.zero, in: g.view)
                 return
             }
@@ -164,8 +168,19 @@ struct CanvasGestureSurface: UIViewRepresentable {
                 parent.onCanvasGestureBegan()
             case .changed:
                 let t = g.translation(in: g.view)
-                parent.offset.width  += t.x
-                parent.offset.height += t.y
+                // Pinch handler already moves `offset` to track the
+                // gesture centroid (including any two-finger drift), so
+                // adding pan's translation on top would double-count.
+                // bgPan is the pan-only mirror — feed it the raw
+                // translation whether or not pinch is active, so the
+                // background drifts during pan-while-pinching but
+                // doesn't slide for a pure scale change.
+                if !pinchActive {
+                    parent.offset.width  += t.x
+                    parent.offset.height += t.y
+                }
+                parent.bgPan.width  += t.x
+                parent.bgPan.height += t.y
                 g.setTranslation(.zero, in: g.view)
             default:
                 break
