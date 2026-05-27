@@ -130,6 +130,19 @@ enum Migrations {
             )
         }
 
+        // Per-area placement strategy for fresh skills. `.manual` matches
+        // the historical drop-at-center spiral-out behaviour; algorithms
+        // (`.concentric` initially) compute a position from the new
+        // skill's relationship to its prereqs. Backfill = `"manual"` so
+        // existing hobbies stay opt-out by default.
+        m.registerMigration("v7_area_layout_kind") { db in
+            try db.alter(table: "areas") { t in
+                t.add(column: "layout_kind", .text)
+                    .notNull()
+                    .defaults(to: "manual")
+            }
+        }
+
         return m
     }
 

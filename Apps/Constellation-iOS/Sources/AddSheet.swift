@@ -28,6 +28,29 @@ struct AddSheet: View {
     // the canvas on it or auto-select it as a prereq.
     let onAdded: (AreaID, SkillID?) -> Void
 
+    // Optional skill the user is editing in a picker context (prereq /
+    // unlocks). Used as the "drop the new skill near this one" hint:
+    // pre-selects its hobby (so the new skill lands in the same cluster)
+    // and feeds its position into the manual placement spiral so a new
+    // prereq doesn't materialise at the area centroid far from where
+    // the user was working. Concentric layout uses graph topology
+    // instead, so this hint is ignored there.
+    let seedSkill: Skill?
+
+    init(
+        areas: [Area],
+        store: Store,
+        onClose: @escaping () -> Void,
+        onAdded: @escaping (AreaID, SkillID?) -> Void,
+        seedSkill: Skill? = nil
+    ) {
+        self.areas = areas
+        self.store = store
+        self.onClose = onClose
+        self.onAdded = onAdded
+        self.seedSkill = seedSkill
+    }
+
     @State private var mode: Mode = .skill
 
     // Skill form
@@ -91,11 +114,15 @@ struct AddSheet: View {
             }
             .preferredColorScheme(.dark)
             .onAppear {
-                // Prefer the last hobby the user saved into; fall back
-                // to the first if there's no stored value or the stored
-                // one has since been deleted.
+                // Prefer the picker-context skill's hobby (so a "new
+                // prereq" lands in the same cluster you were just
+                // looking at), then the last hobby the user saved
+                // into, then the first existing hobby as a last resort.
                 if skillAreaId == nil {
-                    if let stored = AreaID(rawValue: lastSkillAreaIdRaw),
+                    if let seedSkill,
+                       areas.contains(where: { $0.id == seedSkill.areaId }) {
+                        skillAreaId = seedSkill.areaId
+                    } else if let stored = AreaID(rawValue: lastSkillAreaIdRaw),
                        areas.contains(where: { $0.id == stored }) {
                         skillAreaId = stored
                     } else {
@@ -209,28 +236,26 @@ struct AddSheet: View {
             throw FormError("pick a hobby first")
         }
         let sid = try await uniqueSkillId(from: skillName.trimmed)
-        // Spread new stars instead of stacking them — without this,
-        // adding N skills to the same area drops them all at the
-        // exact center pixel and the user only ever sees the topmost.
-        // First add still lands at center; subsequent ones spiral out
-        // into the first slot that's clear of existing stars.
-        // Centre tracks the current cluster (centroid of live skills)
-        // rather than the area's stored centerX/centerY, so dragging the
-        // hobby across the sky doesn't leave new stars stranded at the
-        // old logical center.
         let allSkills = try await store.skills()
-        let (cx, cy) = area.liveCenter(in: allSkills)
-        let areaSkills = allSkills.filter { $0.areaId == areaId && !$0.isDeleted }
-        let (x, y) = openSpot(near: cx, near: cy, avoiding: areaSkills)
-        let skill = Skill(
+        // Picker-context hint: drop the new skill near the skill the
+        // user was just editing, but only when that skill is in the
+        // *same* area we're saving into. Cross-area picker creates fall
+        // back to area-centric placement so a new "cross-hobby helper"
+        // doesn't land in the wrong cluster.
+        let seedInArea = seedSkill.flatMap { $0.areaId == areaId ? $0 : nil }
+        let draft = Skill(
             id: sid,
             areaId: areaId,
             name: skillName.trimmed,
             status: skillStatus,
-            x: x,
-            y: y,
             isFoundation: skillFoundation
         )
+        let (x, y) = dropSpot(
+            for: draft, in: area, among: allSkills, seedNear: seedInArea
+        )
+        var skill = draft
+        skill.x = x
+        skill.y = y
         try await store.upsertSkill(skill)
         lastSkillAreaIdRaw = areaId.rawValue
         return skill

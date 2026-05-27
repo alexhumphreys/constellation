@@ -21,6 +21,7 @@ struct AreaRow: Codable, FetchableRecord, PersistableRecord {
     var centerX: Double
     var centerY: Double
     var radius: Double
+    var layoutKind: String
     var updatedAt: Date
     var tombstonedAt: Date?
 
@@ -31,6 +32,7 @@ struct AreaRow: Codable, FetchableRecord, PersistableRecord {
         self.centerX = area.centerX
         self.centerY = area.centerY
         self.radius = area.radius
+        self.layoutKind = area.layoutKind.rawValue
         self.updatedAt = area.updatedAt
         self.tombstonedAt = area.tombstonedAt
     }
@@ -43,6 +45,7 @@ struct AreaRow: Codable, FetchableRecord, PersistableRecord {
             centerX: centerX,
             centerY: centerY,
             radius: radius,
+            layoutKind: LayoutKind(rawValue: layoutKind) ?? .manual,
             updatedAt: updatedAt,
             tombstonedAt: tombstonedAt
         )

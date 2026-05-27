@@ -6,7 +6,7 @@ struct AreaCommands: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "area",
         abstract: "Manage constellations (silks, diving, dance…).",
-        subcommands: [Add.self, List.self, Show.self, Tint.self, Delete.self]
+        subcommands: [Add.self, List.self, Show.self, Tint.self, Layout.self, Delete.self]
     )
 
     struct Add: AsyncParsableCommand {
@@ -32,11 +32,21 @@ struct AreaCommands: AsyncParsableCommand {
         @Option(name: .long, help: "Cluster radius.")
         var radius: Double = 400
 
+        @Option(name: .long, help: "Layout strategy for new skills (manual|concentric).")
+        var layout: String = LayoutKind.manual.rawValue
+
         func run() async throws {
             let ctx = try await AppContext.standard()
+            guard let kind = LayoutKind(rawValue: layout) else {
+                throw ValidationError(
+                    "unknown layout '\(layout)' — expected one of "
+                    + LayoutKind.allCases.map(\.rawValue).joined(separator: ", ")
+                )
+            }
             let area = Area(
                 id: AreaID(id), name: name, tint: tint,
-                centerX: x, centerY: y, radius: radius
+                centerX: x, centerY: y, radius: radius,
+                layoutKind: kind
             )
             try await ctx.store.upsertArea(area)
             print("added area \(id) (\(name))")
@@ -78,6 +88,7 @@ struct AreaCommands: AsyncParsableCommand {
             print("\(area.name)  (\(area.id.rawValue))")
             print("  tint:   \(area.tint)")
             print("  center: (\(area.centerX), \(area.centerY))  r=\(area.radius)")
+            print("  layout: \(area.layoutKind.rawValue)")
             print("  skills: \(skills.count)")
             let byStatus = Dictionary(grouping: skills, by: \.status)
             for status in SkillStatus.allCases {
@@ -107,6 +118,33 @@ struct AreaCommands: AsyncParsableCommand {
             area.updatedAt = Date()
             try await ctx.store.upsertArea(area)
             print("\(id) tint → \(area.tint)")
+        }
+    }
+
+    struct Layout: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Set the auto-layout strategy for new skills in an area."
+        )
+
+        @Argument var id: String
+        @Argument(help: "Strategy: manual or concentric.")
+        var kind: String
+
+        func run() async throws {
+            let ctx = try await AppContext.standard()
+            guard let parsed = LayoutKind(rawValue: kind) else {
+                throw ValidationError(
+                    "unknown layout '\(kind)' — expected one of "
+                    + LayoutKind.allCases.map(\.rawValue).joined(separator: ", ")
+                )
+            }
+            guard var area = try await ctx.store.area(AreaID(id)) else {
+                throw ValidationError("no area '\(id)'")
+            }
+            area.layoutKind = parsed
+            area.updatedAt = Date()
+            try await ctx.store.upsertArea(area)
+            print("\(id) layout → \(parsed.rawValue)")
         }
     }
 

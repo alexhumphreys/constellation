@@ -141,7 +141,12 @@ struct PrereqPickerSheet: View {
                                 showAllAreas = true
                             }
                         }
-                    }
+                    },
+                    // Picker-context: drop the new skill near the one
+                    // we're editing so a fresh prereq materialises in
+                    // the cluster the user was already looking at,
+                    // rather than at the area centroid.
+                    seedSkill: skill
                 )
             }
         }

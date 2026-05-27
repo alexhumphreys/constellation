@@ -122,7 +122,8 @@ struct UnlocksPickerSheet: View {
                                 showAllAreas = true
                             }
                         }
-                    }
+                    },
+                    seedSkill: skill
                 )
             }
         }

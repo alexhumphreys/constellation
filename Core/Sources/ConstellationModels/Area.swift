@@ -16,6 +16,15 @@ public struct Area: Hashable, Sendable, Codable {
     public var centerX: Double
     public var centerY: Double
     public var radius: Double
+    // How fresh skills are placed inside this cluster. `.manual` (the
+    // historical behavior) drops them at the area's live centroid and
+    // spirals out for clearance. Algorithms like `.concentric` compute
+    // a position from the skill's relationship to the rest of the
+    // graph — depth from foundation = ring number, etc. — so a hobby
+    // can opt in to auto-layout without affecting the others. Pinned
+    // skills (anything the user has dragged) stay put either way; the
+    // strategy only runs at the new-skill drop call site.
+    public var layoutKind: LayoutKind
     public var updatedAt: Date
     public var tombstonedAt: Date?
 
@@ -26,6 +35,7 @@ public struct Area: Hashable, Sendable, Codable {
         centerX: Double = 1200,
         centerY: Double = 800,
         radius: Double = 400,
+        layoutKind: LayoutKind = .manual,
         updatedAt: Date = Date(),
         tombstonedAt: Date? = nil
     ) {
@@ -35,6 +45,7 @@ public struct Area: Hashable, Sendable, Codable {
         self.centerX = centerX
         self.centerY = centerY
         self.radius = radius
+        self.layoutKind = layoutKind
         self.updatedAt = updatedAt
         self.tombstonedAt = tombstonedAt
     }
@@ -64,5 +75,26 @@ public struct Area: Hashable, Sendable, Codable {
         let trimmed = tint.trimmingCharacters(in: .whitespacesAndNewlines)
         let withHash = trimmed.hasPrefix("#") ? trimmed : "#" + trimmed
         return withHash.lowercased()
+    }
+}
+
+// How fresh-skill drop coords are picked for an area. Unknown raw values
+// decode as `.manual` so a future algorithm coming over MC sync from a
+// newer build degrades gracefully on an older one (the only cost: new
+// skills drop manually until the older device is updated).
+public enum LayoutKind: String, Hashable, Sendable, Codable, CaseIterable {
+    case manual
+    case concentric
+
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = LayoutKind(rawValue: raw) ?? .manual
+    }
+
+    public var displayLabel: String {
+        switch self {
+        case .manual: "Manual"
+        case .concentric: "Concentric"
+        }
     }
 }

@@ -17,6 +17,7 @@ struct EditHobbySheet: View {
 
     @State private var name: String
     @State private var tint: Color
+    @State private var layoutKind: LayoutKind
 
     @State private var saving: Bool = false
     @State private var showDeleteConfirm: Bool = false
@@ -36,6 +37,7 @@ struct EditHobbySheet: View {
         self.onDeleted = onDeleted
         _name = State(initialValue: area.name)
         _tint = State(initialValue: area.color)
+        _layoutKind = State(initialValue: area.layoutKind)
     }
 
     var body: some View {
@@ -46,6 +48,16 @@ struct EditHobbySheet: View {
                 }
                 Section("Tint") {
                     ColorPicker("Color", selection: $tint, supportsOpacity: false)
+                }
+                Section {
+                    Picker("Layout", selection: $layoutKind) {
+                        ForEach(LayoutKind.allCases, id: \.self) { k in
+                            Text(k.displayLabel).tag(k)
+                        }
+                    }
+                } footer: {
+                    Text(layoutFooter)
+                        .font(.caption2)
                 }
                 Section {
                     Button(role: .destructive) {
@@ -98,6 +110,15 @@ struct EditHobbySheet: View {
         !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    private var layoutFooter: String {
+        switch layoutKind {
+        case .manual:
+            "Fresh skills drop at the cluster center and spiral out to a clear spot. Existing stars stay where you put them."
+        case .concentric:
+            "Fresh skills land on a concentric ring — foundations at the center, each prereq hop one ring further out. Drag any star to pin it."
+        }
+    }
+
     private func save() {
         saving = true
         errorMessage = nil
@@ -106,6 +127,7 @@ struct EditHobbySheet: View {
                 var updated = area
                 updated.name = name.trimmingCharacters(in: .whitespacesAndNewlines)
                 updated.tint = hexString(from: tint)
+                updated.layoutKind = layoutKind
                 updated.updatedAt = Date()
                 try await store.upsertArea(updated)
                 await MainActor.run {
