@@ -73,6 +73,13 @@ struct SkyView: View {
     // so the focused star lands in the upper half — the part not
     // covered by the medium-detent inspector sheet.
     let focusVerticalBias: CGFloat
+    // Multi-select state. In select mode, tap toggles a star's id
+    // in/out of `multiSelectedIds` instead of opening the inspector,
+    // and long-press-drag on a selected star moves the whole group
+    // rigidly (every selected star's position override picks up the
+    // same world-delta).
+    let isSelectMode: Bool
+    @Binding var multiSelectedIds: Set<SkillID>
 
     init(
         skills: [Skill],
@@ -87,6 +94,8 @@ struct SkyView: View {
         selectedSkillId: Binding<SkillID?>,
         focusRequest: Binding<FocusRequest?> = .constant(nil),
         focusVerticalBias: CGFloat = 0.5,
+        isSelectMode: Bool = false,
+        multiSelectedIds: Binding<Set<SkillID>> = .constant([]),
         onCanvasGesture: @escaping () -> Void = {}
     ) {
         self.skills = skills
@@ -101,6 +110,8 @@ struct SkyView: View {
         self._selectedSkillId = selectedSkillId
         self._focusRequest = focusRequest
         self.focusVerticalBias = focusVerticalBias
+        self.isSelectMode = isSelectMode
+        self._multiSelectedIds = multiSelectedIds
         self.onCanvasGesture = onCanvasGesture
     }
 
@@ -121,6 +132,17 @@ struct SkyView: View {
     // `skills` so the star doesn't jump.
     @State private var draggingSkillId: SkillID? = nil
     @State private var dragOverride: CGPoint? = nil
+
+    // Group-drag override. When the user long-presses on a star that's
+    // part of a multi-selection, every selected star moves by the same
+    // world-space delta. `groupBaselines` snapshots each selected
+    // star's pre-drag position so we can recompute overrides each tick
+    // without accumulating floating-point drift, and `groupAnchorWorld`
+    // is the world point where the drag started (the anchor against
+    // which deltas are measured).
+    @State private var groupBaselines: [SkillID: CGPoint] = [:]
+    @State private var groupAnchorWorld: CGPoint = .zero
+    @State private var groupDelta: CGSize = .zero
 
     private let world = CGSize(width: 2400, height: 1600)
     private let zoomBounds: ClosedRange<CGFloat> = 0.30...3.00
@@ -335,6 +357,34 @@ struct SkyView: View {
                             Path(ellipseIn: rect),
                             with: .color(tint.opacity(opacity * 0.95)),
                             lineWidth: 1.4
+                        )
+                    }
+
+                    // Multi-select ring: gold halo + solid inner ring,
+                    // distinct from the single-select treatment so a
+                    // selection of one star (in select mode) still
+                    // reads as "selected for group ops" rather than
+                    // "open in the inspector".
+                    if multiSelectedIds.contains(skill.id) {
+                        let r1 = visual.size + 8
+                        let rect1 = CGRect(
+                            x: p.x - r1, y: p.y - r1,
+                            width: r1 * 2, height: r1 * 2
+                        )
+                        context.stroke(
+                            Path(ellipseIn: rect1),
+                            with: .color(Theme.Sky.chain),
+                            lineWidth: 2.0
+                        )
+                        let r2 = visual.size + 13
+                        let rect2 = CGRect(
+                            x: p.x - r2, y: p.y - r2,
+                            width: r2 * 2, height: r2 * 2
+                        )
+                        context.stroke(
+                            Path(ellipseIn: rect2),
+                            with: .color(Theme.Sky.chain.opacity(0.35)),
+                            lineWidth: 1.0
                         )
                     }
 
@@ -783,6 +833,22 @@ struct SkyView: View {
         at location: CGPoint, in size: CGSize, transform: CanvasTransform
     ) {
         let bestId = hitTest(at: location, transform: transform)
+        if isSelectMode {
+            // Multi-select: tap a star toggles it in/out of the set,
+            // tap empty space clears the set. Inspector is suppressed
+            // by the parent while this mode is on so a single tap
+            // can't accidentally open it.
+            if let bestId {
+                if multiSelectedIds.contains(bestId) {
+                    multiSelectedIds.remove(bestId)
+                } else {
+                    multiSelectedIds.insert(bestId)
+                }
+            } else {
+                multiSelectedIds.removeAll()
+            }
+            return
+        }
         // Tap on background clears selection; tap on a star toggles.
         if let bestId {
             selectedSkillId = (selectedSkillId == bestId) ? nil : bestId
@@ -817,6 +883,10 @@ struct SkyView: View {
     // Render-time position: returns the live drag override if this
     // is the star being dragged, otherwise its persisted (x, y).
     private func worldPosition(of skill: Skill) -> CGPoint {
+        if !groupBaselines.isEmpty, let base = groupBaselines[skill.id] {
+            return CGPoint(x: base.x + groupDelta.width,
+                           y: base.y + groupDelta.height)
+        }
         if let dragOverride, draggingSkillId == skill.id {
             return dragOverride
         }
@@ -826,24 +896,52 @@ struct SkyView: View {
     // True iff the long-press began over a star — that's the signal
     // CanvasGestureSurface uses to suppress pan for the rest of the
     // gesture. Returning false means "no star here, let normal
-    // recognizers proceed".
+    // recognizers proceed". A long-press on a selected star with the
+    // group set populated promotes to a rigid group-translate; lone
+    // stars fall back to the single-skill drag path.
     private func beginDrag(
         at location: CGPoint, transform: CanvasTransform
     ) -> Bool {
         guard let hit = hitTest(at: location, transform: transform) else {
             return false
         }
+        let world = screenToWorld(location)
+        // Group drag wins when the user grabs a selected star while
+        // 2+ are selected. With exactly one selected star (the same
+        // one being dragged), it's indistinguishable from a single
+        // drag, so we fall through to the normal path — cheaper to
+        // upsert one row than to dispatch through the group code.
+        if isSelectMode,
+           multiSelectedIds.contains(hit),
+           multiSelectedIds.count >= 2 {
+            var baselines: [SkillID: CGPoint] = [:]
+            for s in skills where multiSelectedIds.contains(s.id) {
+                baselines[s.id] = CGPoint(x: s.x, y: s.y)
+            }
+            groupBaselines = baselines
+            groupAnchorWorld = world
+            groupDelta = .zero
+            return true
+        }
         draggingSkillId = hit
         // Initialize the override to the finger location in world
         // coords so the very first render snaps the star under the
         // finger (rather than leaving a one-frame visual gap).
-        dragOverride = screenToWorld(location)
+        dragOverride = world
         return true
     }
 
     private func updateDrag(at location: CGPoint) {
+        let world = screenToWorld(location)
+        if !groupBaselines.isEmpty {
+            groupDelta = CGSize(
+                width: world.x - groupAnchorWorld.x,
+                height: world.y - groupAnchorWorld.y
+            )
+            return
+        }
         guard draggingSkillId != nil else { return }
-        dragOverride = screenToWorld(location)
+        dragOverride = world
     }
 
     // On end, persist via Store.upsertSkill (LWW merge, bumps
@@ -851,6 +949,10 @@ struct SkyView: View {
     // *after* the refresh has had a chance to land — clearing eagerly
     // would snap the star back to its old position for one frame.
     private func endDrag() {
+        if !groupBaselines.isEmpty {
+            commitGroupDrag()
+            return
+        }
         guard let id = draggingSkillId, let target = dragOverride else {
             draggingSkillId = nil
             dragOverride = nil
@@ -878,6 +980,41 @@ struct SkyView: View {
                 // revert is better than a stuck "off by inches" star.
                 await MainActor.run { dragOverride = nil }
             }
+        }
+    }
+
+    // Persist one upsert per touched skill (one `skill.upsert` wide
+    // event each — matches the wide-events-as-business-logic pattern).
+    // Stays serial so an inbound MC merge mid-flight can't see a
+    // half-applied group (each upsert lands atomically; the worst case
+    // is the user sees N/2 stars moved while the rest are loading,
+    // never N/2 in the new spot and N/2 in some inconsistent third).
+    private func commitGroupDrag() {
+        let baselines = groupBaselines
+        let delta = groupDelta
+        // Clear visual state at the start; the persisted x/y will
+        // arrive via the parent reload below.
+        groupBaselines = [:]
+        groupAnchorWorld = .zero
+        groupDelta = .zero
+        guard !baselines.isEmpty, delta != .zero else {
+            return
+        }
+        let now = Date()
+        let bySkillId = Dictionary(uniqueKeysWithValues: skills.map { ($0.id, $0) })
+        var updates: [Skill] = []
+        for (id, base) in baselines {
+            guard var s = bySkillId[id] else { continue }
+            s.x = Double(base.x + delta.width)
+            s.y = Double(base.y + delta.height)
+            s.updatedAt = now
+            updates.append(s)
+        }
+        Task {
+            for s in updates {
+                try? await store.upsertSkill(s)
+            }
+            await MainActor.run { onMutation() }
         }
     }
 

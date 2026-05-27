@@ -34,6 +34,13 @@ struct RootView: View {
     @State private var chainFadeTask: Task<Void, Never>? = nil
     @State private var reloadToken: Int = 0
     @State private var showAddSheet: Bool = false
+    // Multi-select mode: when on, taps toggle stars in/out of
+    // `selectedSkillIds`, long-press-drag on a selected star moves the
+    // whole group, and the inspector is suppressed so the canvas stays
+    // the foreground surface. Exiting the mode (or saving) clears the
+    // set automatically.
+    @State private var isSelectMode: Bool = false
+    @State private var selectedSkillIds: Set<SkillID> = []
     // Set when we want SkyView to pan/zoom onto a specific skill —
     // primarily right after adding a new one so it doesn't drop at the
     // area center and immediately get lost behind existing stars. SkyView
@@ -114,6 +121,19 @@ struct RootView: View {
                     skillId: newValue,
                     preserveScale: true
                 )
+            }
+        }
+        // Leaving select mode clears the selection so re-entering
+        // starts fresh, and drops any in-flight multi-drag that
+        // SkyView is still rendering an override for.
+        .onChange(of: isSelectMode) { _, newValue in
+            if !newValue {
+                selectedSkillIds = []
+            } else {
+                // Hide the inspector on entering — multi-select and a
+                // single-skill detail sheet would fight for the bottom
+                // half of the canvas.
+                selectedSkillId = nil
             }
         }
         .sheet(isPresented: Binding(
@@ -214,14 +234,23 @@ struct RootView: View {
                     syncStatus: context.peerSync.status,
                     onSyncTap: { showSyncSheet = true }
                 )
-                addCanvasButton
+                HStack(spacing: 10) {
+                    addCanvasButton
+                    selectModeButton
+                }
             }
             .padding(.top, 12)
             .padding(.leading, 16)
+            if isSelectMode {
+                selectModeBanner
+                    .frame(maxWidth: .infinity, alignment: .top)
+                    .padding(.top, 12)
+            }
         }
         .sheet(isPresented: $showAddSheet) { addSheet }
         .overlay(alignment: .trailing) {
-            if let selectedSkillId,
+            if !isSelectMode,
+               let selectedSkillId,
                let skill = skills.first(where: { $0.id == selectedSkillId })
             {
                 SkillDetailView(
@@ -266,16 +295,24 @@ struct RootView: View {
                     syncStatus: context.peerSync.status,
                     onSyncTap: { showSyncSheet = true }
                 )
-                addCanvasButton
+                HStack(spacing: 10) {
+                    addCanvasButton
+                    selectModeButton
+                }
             }
             .padding(.top, 12)
             .padding(.leading, 12)
+            if isSelectMode {
+                selectModeBanner
+                    .frame(maxWidth: .infinity, alignment: .top)
+                    .padding(.top, 12)
+            }
         }
         .background(Theme.Sky.bg1.ignoresSafeArea())
         .sheet(isPresented: $showAddSheet) { addSheet }
         .sheet(
             isPresented: Binding(
-                get: { selectedSkillId != nil },
+                get: { !isSelectMode && selectedSkillId != nil },
                 set: { if !$0 { selectedSkillId = nil } }
             )
         ) {
@@ -330,6 +367,8 @@ struct RootView: View {
             // of the canvas; aim focus animations at the upper-half
             // centroid so the focused star isn't hidden by the sheet.
             focusVerticalBias: sizeClass == .compact ? 0.25 : 0.5,
+            isSelectMode: isSelectMode,
+            multiSelectedIds: $selectedSkillIds,
             // Pan or pinch clears a lingering chain trace — the
             // overlay is meant to explain a specific selection, not
             // float around indefinitely. Fade out over 2s instead
@@ -361,6 +400,69 @@ struct RootView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Add skill or hobby")
+        .disabled(isSelectMode)
+        .opacity(isSelectMode ? 0.45 : 1.0)
+    }
+
+    // Status pill that floats at the top while select mode is on so
+    // the user can see (a) what mode they're in and (b) how many
+    // stars are currently selected. Long-press-drag affordance is
+    // implicit — the count crossing 2 silently unlocks group move.
+    @ViewBuilder
+    private var selectModeBanner: some View {
+        let count = selectedSkillIds.count
+        let label: String = {
+            switch count {
+            case 0: return "Tap stars to select"
+            case 1: return "1 selected — pick more, then drag"
+            default: return "\(count) selected — long-press to move"
+            }
+        }()
+        HStack(spacing: 10) {
+            Image(systemName: "cursorarrow.click.2")
+                .foregroundStyle(Theme.Sky.chain)
+            Text(label)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.white.opacity(0.95))
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(
+            Capsule()
+                .fill(.black.opacity(0.40))
+                .background(Capsule().fill(.ultraThinMaterial))
+                .overlay(Capsule().stroke(Theme.Sky.chain.opacity(0.55), lineWidth: 1))
+        )
+        .accessibilityLabel(label)
+        .allowsHitTesting(false)
+    }
+
+    // Toggle pill for entering / leaving select mode. While on, taps
+    // toggle stars in/out of the selection set instead of opening the
+    // inspector, and long-press-drag on a selected star translates the
+    // whole group. The pill itself reads selected by inverting its
+    // fill so it's obviously a mode and not a one-shot action.
+    private var selectModeButton: some View {
+        Button(action: { isSelectMode.toggle() }) {
+            Image(systemName: isSelectMode
+                ? "cursorarrow.click.2"
+                : "cursorarrow.click")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(isSelectMode
+                    ? Theme.Sky.bg1
+                    : .white.opacity(0.85))
+                .frame(width: 44, height: 44)
+                .background(
+                    Circle()
+                        .fill(isSelectMode
+                            ? AnyShapeStyle(Theme.Sky.chain)
+                            : AnyShapeStyle(.black.opacity(0.30)))
+                        .background(Circle().fill(.ultraThinMaterial))
+                        .overlay(Circle().stroke(.white.opacity(0.10), lineWidth: 1))
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(isSelectMode ? "Exit select mode" : "Enter select mode")
     }
 
     // Resolved BFS backward chain for the active target, materialised as
