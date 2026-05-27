@@ -150,6 +150,59 @@ struct AttachmentImporter {
         return fmt.date(from: str)
     }
 
+    // MARK: - Still-from-video path
+
+    // Entry point for grabbing the currently-displayed frame out of an
+    // in-app video viewer and persisting it as a sibling photo
+    // attachment. Skips the PhotoKit picker pipeline because the source
+    // is an already-decoded CGImage from AVAssetImageGenerator. Encoded
+    // at quality 0.92 (higher than picker imports) — frame grabs are
+    // expected to be inspected for detail, so we trade a bit of disk
+    // for visual fidelity.
+    func importStill(
+        cgImage: CGImage,
+        for skillId: SkillID,
+        capturedAt: Date?
+    ) async throws -> Attachment {
+        let jpegData = try encodeStillJPEG(cgImage, quality: 0.92)
+        let hash = try await assets.write(jpegData, fileExtension: "jpg")
+        try await writeThumbnail(from: jpegData, isVideo: false, hash: hash)
+        let attachment = Attachment(
+            skillId: skillId,
+            contentHash: hash,
+            mediaType: .photo,
+            mimeType: "image/jpeg",
+            byteSize: Int64(jpegData.count),
+            width: cgImage.width,
+            height: cgImage.height,
+            durationMs: nil,
+            capturedAt: capturedAt
+        )
+        try await store.upsertAttachment(attachment)
+        return attachment
+    }
+
+    private func encodeStillJPEG(
+        _ cgImage: CGImage, quality: CGFloat
+    ) throws -> Data {
+        let out = NSMutableData()
+        guard
+            let dst = CGImageDestinationCreateWithData(
+                out, UTType.jpeg.identifier as CFString, 1, nil
+            )
+        else {
+            throw ImportError.imageEncodeFailed
+        }
+        let opts: [CFString: Any] = [
+            kCGImageDestinationLossyCompressionQuality: quality
+        ]
+        CGImageDestinationAddImage(dst, cgImage, opts as CFDictionary)
+        guard CGImageDestinationFinalize(dst) else {
+            throw ImportError.imageEncodeFailed
+        }
+        return out as Data
+    }
+
     // MARK: - Video path
 
     private func importVideo(

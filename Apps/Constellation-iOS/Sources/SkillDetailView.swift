@@ -180,6 +180,13 @@ struct SkillDetailView: View {
                     viewingAttachment = nil
                     Task { await reload() }
                     onMutation()
+                },
+                onCreated: {
+                    // Frame grab from a video — refresh the grid in the
+                    // background but keep the sheet open so the user
+                    // can grab more frames in the same session.
+                    Task { await reload() }
+                    onMutation()
                 }
             )
         }

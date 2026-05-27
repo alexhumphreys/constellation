@@ -3,19 +3,24 @@ import SwiftUI
 
 // Full-screen viewer for one attachment. Photos render via SwiftUI's
 // Image (loaded from disk, not the thumbnail), videos via
-// VideoPlayerView which wraps AVPlayerViewController and layers a
-// frame-step row on top of the stock AVKit transport. Both share a
-// chrome of caption (read-only for v1) and a delete affordance.
+// VideoPlayerView with a custom transport + frame-step row. Both share
+// a chrome of caption (read-only for v1) and a delete affordance.
 //
 // State stays local to the sheet — when the user deletes, we tombstone
 // via the Store, call onDeleted, and the inspector's reload pulls the
 // updated list. Same lifecycle as Clip edit.
+//
+// When viewing a video the user can also tap "save frame" to write
+// the current frame as a sibling photo attachment; that runs the still
+// through AttachmentImporter.importStill and calls onCreated so the
+// inspector grid behind us reloads with the new tile.
 struct AttachmentViewerSheet: View {
     let attachment: Attachment
     let store: Store
     let assets: AssetStore
     let onClose: () -> Void
     let onDeleted: () -> Void
+    let onCreated: () -> Void
 
     @State private var loadedURL: URL?
     @State private var loadError: String?
@@ -85,7 +90,11 @@ struct AttachmentViewerSheet: View {
             case .photo:
                 photoView(url: loadedURL)
             case .video:
-                VideoPlayerView(url: loadedURL)
+                VideoPlayerView(url: loadedURL) { frame in
+                    try await saveFrame(
+                        image: frame.image, offset: frame.offset
+                    )
+                }
             }
         } else {
             ProgressView().tint(.white)
@@ -122,6 +131,22 @@ struct AttachmentViewerSheet: View {
                 self.loadError = String(describing: error)
             }
         }
+    }
+
+    // Frame's capturedAt = video.capturedAt + frame offset so the new
+    // photo sorts chronologically just after the source video in the
+    // attachment grid. Falls back to "now" if the source has no capture
+    // date (airdropped, screen-recorded, etc.).
+    private func saveFrame(image: CGImage, offset: Double) async throws {
+        let base = attachment.capturedAt ?? Date()
+        let stillCapturedAt = base.addingTimeInterval(offset)
+        let importer = AttachmentImporter(assets: assets, store: store)
+        _ = try await importer.importStill(
+            cgImage: image,
+            for: attachment.skillId,
+            capturedAt: stillCapturedAt
+        )
+        await MainActor.run { onCreated() }
     }
 
     private func deleteAttachment() async {

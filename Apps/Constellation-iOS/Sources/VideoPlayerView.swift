@@ -76,6 +76,39 @@ final class VideoPlayerController {
         item.step(byCount: count)
     }
 
+    // Pulls the frame at the current playhead via AVAssetImageGenerator
+    // with zero tolerance so the returned CGImage matches what's on
+    // screen exactly (including after a step). Pauses first so the
+    // playhead doesn't drift between extraction and the user's intent.
+    func currentFrame() async throws -> (image: CGImage, offset: Double) {
+        player.pause()
+        guard let asset = player.currentItem?.asset else {
+            throw VideoFrameError.noAsset
+        }
+        let time = player.currentTime()
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        let image: CGImage = try await withCheckedThrowingContinuation {
+            (cont: CheckedContinuation<CGImage, Error>) in
+            generator.generateCGImagesAsynchronously(
+                forTimes: [NSValue(time: time)]
+            ) { _, image, _, result, error in
+                if let error {
+                    cont.resume(throwing: error)
+                    return
+                }
+                guard result == .succeeded, let image else {
+                    cont.resume(throwing: VideoFrameError.extractionFailed)
+                    return
+                }
+                cont.resume(returning: image)
+            }
+        }
+        return (image, time.seconds.isFinite ? time.seconds : 0)
+    }
+
     private func tick() {
         if !isScrubbing,
            let t = player.currentItem?.currentTime().seconds,
@@ -90,12 +123,35 @@ final class VideoPlayerController {
     }
 }
 
+enum VideoFrameError: Error {
+    case noAsset
+    case extractionFailed
+}
+
 struct VideoPlayerView: View {
     @State private var controller: VideoPlayerController
     @State private var isFullscreen: Bool = false
+    @State private var saveState: FrameSaveState = .idle
 
-    init(url: URL) {
+    // Optional handler for saving the displayed frame as a sibling
+    // photo attachment. Nil means the save button hides entirely —
+    // keeps the player reusable in viewers that don't have an
+    // attachment context (e.g. a future preview before import).
+    let onSaveFrame: ((image: CGImage, offset: Double)) async throws -> Void
+
+    init(
+        url: URL,
+        onSaveFrame: @escaping ((image: CGImage, offset: Double)) async throws -> Void
+    ) {
         _controller = State(initialValue: VideoPlayerController(url: url))
+        self.onSaveFrame = onSaveFrame
+    }
+
+    enum FrameSaveState: Equatable {
+        case idle
+        case saving
+        case saved
+        case failed
     }
 
     var body: some View {
@@ -161,7 +217,7 @@ struct VideoPlayerView: View {
     }
 
     private var buttonRow: some View {
-        HStack(spacing: 28) {
+        HStack(spacing: 22) {
             controlButton("backward.frame.fill", "Previous frame") {
                 controller.stepFrame(by: -1)
             }
@@ -180,6 +236,53 @@ struct VideoPlayerView: View {
             }
             controlButton("forward.frame.fill", "Next frame") {
                 controller.stepFrame(by: 1)
+            }
+            saveFrameButton
+        }
+    }
+
+    @ViewBuilder
+    private var saveFrameButton: some View {
+        let (icon, tint): (String, Color) = {
+            switch saveState {
+            case .idle:   return ("photo.badge.plus.fill", .white)
+            case .saving: return ("photo.badge.plus.fill", .white.opacity(0.4))
+            case .saved:  return ("checkmark.circle.fill", .green)
+            case .failed: return ("exclamationmark.triangle.fill", .yellow)
+            }
+        }()
+        Button {
+            saveCurrentFrame()
+        } label: {
+            ZStack {
+                Image(systemName: icon)
+                    .font(.system(size: 22))
+                    .foregroundStyle(tint)
+                if saveState == .saving {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(.white)
+                }
+            }
+            .frame(minWidth: 44, minHeight: 44)
+        }
+        .accessibilityLabel("Save current frame as photo")
+        .disabled(saveState == .saving)
+    }
+
+    private func saveCurrentFrame() {
+        Task {
+            saveState = .saving
+            do {
+                let frame = try await controller.currentFrame()
+                try await onSaveFrame(frame)
+                saveState = .saved
+                try? await Task.sleep(for: .milliseconds(1200))
+                if saveState == .saved { saveState = .idle }
+            } catch {
+                saveState = .failed
+                try? await Task.sleep(for: .milliseconds(1500))
+                if saveState == .failed { saveState = .idle }
             }
         }
     }
