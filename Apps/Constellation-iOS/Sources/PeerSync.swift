@@ -111,6 +111,12 @@ final class PeerSync: NSObject {
     // fresh snapshot merge so a dropped peer can't strand the set
     // forever (next merge cycle re-requests anything still missing).
     @ObservationIgnored private var pendingIncomingBlobs: Set<String> = []
+    // Wall-clock timestamp for each outbound BlobRequest, keyed by hash.
+    // Read on the matching BlobResponse to compute end-to-end
+    // request→bytes-written latency for the receive wide event. With
+    // one-at-a-time pacing this holds 0 or 1 entries; dict shape stays
+    // forward-compatible if we later allow a small in-flight window.
+    @ObservationIgnored private var blobRequestSentAt: [String: Date] = [:]
     // Content hash of the most recent snapshot we sent. Don't resend
     // identical content — saves bandwidth and prevents infinite
     // ping-pong where A sends, B merges, B sends merged, A merges,
@@ -602,6 +608,7 @@ final class PeerSync: NSObject {
             // the set forever; next merge cycle re-requests from scratch.
             pendingIncomingBlobs = needed
             guard let next = needed.first else { return }
+            blobRequestSentAt[next] = Date()
             let req = PeerMessage.BlobRequest(hashes: [next])
             let data = try Self.encode(.blobRequest(req))
             try session.send(data, toPeers: [peerID], with: .reliable)
@@ -640,6 +647,7 @@ final class PeerSync: NSObject {
         var sent = 0
         var skipped = 0
         for hash in req.hashes {
+            let blobStart = Date()
             do {
                 guard let url = try await assets.url(for: hash) else {
                     skipped += 1
@@ -653,14 +661,20 @@ final class PeerSync: NSObject {
                 let data = try Data(contentsOf: url, options: .mappedIfSafe)
                 let ext = url.pathExtension
                 let resp = PeerMessage.BlobResponse(
-                    hash: hash, ext: ext, data: data
+                    hash: hash, ext: ext, data: data, sentAt: Date()
                 )
                 let encoded = try Self.encode(.blobResponse(resp))
                 try session.send(encoded, toPeers: [peerID], with: .reliable)
                 sent += 1
+                // dur_ms here covers read + JSON+base64 encode + queueing
+                // into MC's send buffer. The actual wire-transit cost
+                // ends up on the receiver's peer.blob.receive event as
+                // transit_ms, since session.send returns as soon as MC
+                // accepts the buffer (not when peers ack).
                 try? await store.emit(WideEvent(
                     op: "peer.blob.send",
                     outcome: .ok,
+                    durationMs: Self.ms(since: blobStart),
                     fields: [
                         "peer_name": .string(peerName),
                         "hash_prefix": .string(String(hash.prefix(12))),
@@ -671,6 +685,7 @@ final class PeerSync: NSObject {
                 try? await store.emit(WideEvent(
                     op: "peer.blob.send",
                     outcome: .error,
+                    durationMs: Self.ms(since: blobStart),
                     fields: [
                         "peer_name": .string(peerName),
                         "hash_prefix": .string(String(hash.prefix(12))),
@@ -704,18 +719,40 @@ final class PeerSync: NSObject {
         start: Date
     ) async {
         guard let store, let assets else { return }
+        // Two timing breadcrumbs alongside the receive-processing dur_ms:
+        //   - request_to_receive_ms: from our outbound BlobRequest to
+        //     the moment MC handed us the response bytes. Round-trip,
+        //     dominated by the sender's encode + MC's wire transit.
+        //   - transit_ms: from the sender's pre-send stamp to our
+        //     arrival anchor. Strips sender-side encode cost from
+        //     request_to_receive_ms, leaving the wire portion.
+        // Both optional (back-compat with older builds that didn't
+        // stamp / didn't track) and clock-skew-tolerant for transit_ms
+        // since two devices on the same WiFi typically NTP within ms.
+        let requestSentAt = blobRequestSentAt.removeValue(forKey: resp.hash)
+        let requestToReceiveMs: Double? = requestSentAt.map {
+            start.timeIntervalSince($0) * 1000.0
+        }
+        let transitMs: Double? = resp.sentAt.map {
+            start.timeIntervalSince($0) * 1000.0
+        }
         let computed = AssetStore.sha256Hex(resp.data)
         guard computed == resp.hash else {
+            var fields: [String: WideValue] = [
+                "peer_name": .string(peerName),
+                "hash_prefix": .string(String(resp.hash.prefix(12))),
+                "bytes": .int(Int64(resp.data.count)),
+                "reason": .string("hash_mismatch"),
+            ]
+            if let requestToReceiveMs {
+                fields["request_to_receive_ms"] = .double(requestToReceiveMs)
+            }
+            if let transitMs { fields["transit_ms"] = .double(transitMs) }
             try? await store.emit(WideEvent(
                 op: "peer.blob.receive",
                 outcome: .error,
                 durationMs: Self.ms(since: start),
-                fields: [
-                    "peer_name": .string(peerName),
-                    "hash_prefix": .string(String(resp.hash.prefix(12))),
-                    "bytes": .int(Int64(resp.data.count)),
-                    "reason": .string("hash_mismatch"),
-                ]
+                fields: fields
             ))
             return
         }
@@ -742,16 +779,21 @@ final class PeerSync: NSObject {
                 ))
             }
             pendingIncomingBlobs.remove(resp.hash)
+            var fields: [String: WideValue] = [
+                "peer_name": .string(peerName),
+                "hash_prefix": .string(String(resp.hash.prefix(12))),
+                "bytes": .int(Int64(resp.data.count)),
+                "remaining": .int(Int64(pendingIncomingBlobs.count)),
+            ]
+            if let requestToReceiveMs {
+                fields["request_to_receive_ms"] = .double(requestToReceiveMs)
+            }
+            if let transitMs { fields["transit_ms"] = .double(transitMs) }
             try? await store.emit(WideEvent(
                 op: "peer.blob.receive",
                 outcome: .ok,
                 durationMs: Self.ms(since: start),
-                fields: [
-                    "peer_name": .string(peerName),
-                    "hash_prefix": .string(String(resp.hash.prefix(12))),
-                    "bytes": .int(Int64(resp.data.count)),
-                    "remaining": .int(Int64(pendingIncomingBlobs.count)),
-                ]
+                fields: fields
             ))
             // Bump pullCount so any UI listening on inbound changes
             // (the attachments grid in SkillDetailView, future hooks)
@@ -764,17 +806,22 @@ final class PeerSync: NSObject {
             // buffer and our own decode buffer bounded at one payload.
             await requestMissingBlobs(fromPeer: peerID, peerName: peerName)
         } catch {
+            var fields: [String: WideValue] = [
+                "peer_name": .string(peerName),
+                "hash_prefix": .string(String(resp.hash.prefix(12))),
+                "bytes": .int(Int64(resp.data.count)),
+                "reason": .string("write_error"),
+                "error": .string(String(describing: error)),
+            ]
+            if let requestToReceiveMs {
+                fields["request_to_receive_ms"] = .double(requestToReceiveMs)
+            }
+            if let transitMs { fields["transit_ms"] = .double(transitMs) }
             try? await store.emit(WideEvent(
                 op: "peer.blob.receive",
                 outcome: .error,
                 durationMs: Self.ms(since: start),
-                fields: [
-                    "peer_name": .string(peerName),
-                    "hash_prefix": .string(String(resp.hash.prefix(12))),
-                    "bytes": .int(Int64(resp.data.count)),
-                    "reason": .string("write_error"),
-                    "error": .string(String(describing: error)),
-                ]
+                fields: fields
             ))
         }
     }
@@ -807,6 +854,11 @@ final class PeerSync: NSObject {
             // already has it; the asset file just needs a stable name.
             var ext: String
             var data: Data
+            // Sender wall-clock taken just before session.send. Receiver
+            // subtracts from its arrival time to derive wire transit
+            // (encompasses MC's queue + transmission). Optional so older
+            // builds without this field still decode.
+            var sentAt: Date?
         }
     }
 
