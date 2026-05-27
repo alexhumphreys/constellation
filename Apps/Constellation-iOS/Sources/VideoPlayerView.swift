@@ -26,6 +26,9 @@ final class VideoPlayerController {
     var isScrubbing: Bool = false
 
     private var timeObserver: Any?
+    private var scrubSeekInFlight: Bool = false
+    private var pendingScrubTime: Double?
+    private var wasPlayingBeforeScrub: Bool = false
 
     init(url: URL) {
         player = AVPlayer(url: url)
@@ -44,6 +47,10 @@ final class VideoPlayerController {
                 self?.tick()
             }
         }
+        // Autoplay on open — matches Photos and means the user isn't
+        // staring at a static first frame wondering if it's a video.
+        // AVPlayer queues this if the item isn't ready yet.
+        player.play()
     }
 
     func stop() {
@@ -58,6 +65,24 @@ final class VideoPlayerController {
         if isPlaying { player.pause() } else { player.play() }
     }
 
+    // Scrub lifecycle — capture the prior play state on begin so we
+    // can resume playback on release if the user was watching when
+    // they grabbed the scrubber. Without this, every drag pauses
+    // playback permanently.
+    func beginScrub() {
+        wasPlayingBeforeScrub = isPlaying
+        isScrubbing = true
+        player.pause()
+    }
+
+    func endScrub(at time: Double) {
+        isScrubbing = false
+        seek(to: time)
+        if wasPlayingBeforeScrub {
+            player.play()
+        }
+    }
+
     func skip(by seconds: Double) {
         seek(to: max(0, min(currentTime + seconds, duration)))
     }
@@ -68,6 +93,43 @@ final class VideoPlayerController {
             toleranceBefore: .zero,
             toleranceAfter: .zero
         )
+    }
+
+    // Live scrub seek. Apple's standard pattern (QA1820): one seek in
+    // flight at a time, at most one queued — if a new value comes in
+    // while a seek is rendering, replace the queued target and let the
+    // in-flight one finish. Prevents the slider from outpacing the
+    // decoder and ensures every drag position actually paints a frame.
+    // Tolerance of 0.1s is coarse enough to be fast on phone hardware
+    // while staying within ~3 frames of the requested time.
+    func scrubSeek(to time: Double) {
+        if scrubSeekInFlight {
+            pendingScrubTime = time
+            return
+        }
+        performScrubSeek(to: time)
+    }
+
+    private func performScrubSeek(to time: Double) {
+        scrubSeekInFlight = true
+        let target = CMTime(seconds: time, preferredTimescale: 600)
+        let tolerance = CMTime(seconds: 0.1, preferredTimescale: 600)
+        player.seek(
+            to: target,
+            toleranceBefore: tolerance,
+            toleranceAfter: tolerance
+        ) { [weak self] _ in
+            // Completion fires on AVFoundation's private queue; hop
+            // back to the main actor to touch our @MainActor state.
+            Task { @MainActor in
+                guard let self else { return }
+                self.scrubSeekInFlight = false
+                if let pending = self.pendingScrubTime {
+                    self.pendingScrubTime = nil
+                    self.performScrubSeek(to: pending)
+                }
+            }
+        }
     }
 
     func stepFrame(by count: Int) {
@@ -187,18 +249,29 @@ struct VideoPlayerView: View {
             Slider(
                 value: Binding(
                     get: { controller.currentTime },
-                    set: { controller.currentTime = $0 }
+                    set: { newValue in
+                        controller.currentTime = newValue
+                        // Drive video updates while the finger drags
+                        // instead of waiting for release — matches the
+                        // iOS Photos / built-in player behaviour.
+                        if controller.isScrubbing {
+                            controller.scrubSeek(to: newValue)
+                        }
+                    }
                 ),
                 // Degenerate range until duration loads — slider stays
                 // pinned to 0 for that brief window rather than
                 // crashing on 0...0.
                 in: 0...max(controller.duration, 0.001),
                 onEditingChanged: { editing in
-                    controller.isScrubbing = editing
                     if editing {
-                        controller.player.pause()
+                        controller.beginScrub()
                     } else {
-                        controller.seek(to: controller.currentTime)
+                        // Final landing uses zero-tolerance seek so
+                        // the frame matches the slider position
+                        // exactly; resumes play if we paused for the
+                        // scrub.
+                        controller.endScrub(at: controller.currentTime)
                     }
                 }
             )
@@ -218,7 +291,10 @@ struct VideoPlayerView: View {
 
     private var buttonRow: some View {
         HStack(spacing: 22) {
-            controlButton("backward.frame.fill", "Previous frame") {
+            FrameStepButton(
+                icon: "backward.frame.fill",
+                label: "Previous frame"
+            ) {
                 controller.stepFrame(by: -1)
             }
             controlButton("gobackward.10", "Back 10 seconds") {
@@ -234,7 +310,10 @@ struct VideoPlayerView: View {
             controlButton("goforward.10", "Forward 10 seconds") {
                 controller.skip(by: 10)
             }
-            controlButton("forward.frame.fill", "Next frame") {
+            FrameStepButton(
+                icon: "forward.frame.fill",
+                label: "Next frame"
+            ) {
                 controller.stepFrame(by: 1)
             }
             saveFrameButton
@@ -338,6 +417,70 @@ final class PlayerLayerView: UIView {
     override static var layerClass: AnyClass { AVPlayerLayer.self }
     // Force-cast is safe: layerClass above guarantees the backing layer.
     var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+}
+
+// Frame-step button that supports press-and-hold to auto-repeat at
+// ~2Hz after a short initial delay. Built on a zero-distance
+// DragGesture rather than a Button so we can detect the press-down
+// and press-up edges cleanly; tap-to-step still works because the
+// first onChanged event fires the initial step before any hold
+// timer kicks in.
+private struct FrameStepButton: View {
+    let icon: String
+    let label: String
+    let onStep: () -> Void
+
+    @State private var holdTask: Task<Void, Never>?
+    @State private var isHolding: Bool = false
+
+    // Hold cadence: 500ms before repeats start (so a single tap
+    // doesn't accidentally retrigger), then ramp from 500ms down to
+    // 250ms over ~5 ticks. The accelerating feel matches how iOS
+    // long-press repeat keys behave.
+    private static let initialDelay: Duration = .milliseconds(500)
+    private static let startInterval: Duration = .milliseconds(500)
+    private static let minInterval: Duration = .milliseconds(250)
+    private static let intervalStep: Duration = .milliseconds(50)
+
+    var body: some View {
+        Image(systemName: icon)
+            .font(.system(size: 22))
+            .foregroundStyle(.white)
+            .frame(minWidth: 44, minHeight: 44)
+            .contentShape(Rectangle())
+            .scaleEffect(isHolding ? 0.9 : 1.0)
+            .animation(.easeOut(duration: 0.1), value: isHolding)
+            .accessibilityLabel(label)
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in
+                        guard !isHolding else { return }
+                        isHolding = true
+                        onStep()
+                        holdTask = Task { @MainActor in
+                            try? await Task.sleep(for: Self.initialDelay)
+                            var interval = Self.startInterval
+                            while !Task.isCancelled {
+                                onStep()
+                                try? await Task.sleep(for: interval)
+                                interval = max(
+                                    Self.minInterval,
+                                    interval - Self.intervalStep
+                                )
+                            }
+                        }
+                    }
+                    .onEnded { _ in
+                        isHolding = false
+                        holdTask?.cancel()
+                        holdTask = nil
+                    }
+            )
+            .onDisappear {
+                holdTask?.cancel()
+                holdTask = nil
+            }
+    }
 }
 
 // Fullscreen cover for the inline player. Reuses the same AVPlayer so
