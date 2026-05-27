@@ -1,11 +1,11 @@
-import AVKit
 import ConstellationCore
 import SwiftUI
 
 // Full-screen viewer for one attachment. Photos render via SwiftUI's
-// Image (loaded from disk, not the thumbnail), videos via AVKit's
-// VideoPlayer. Both share a chrome of caption (read-only for v1) and a
-// delete affordance.
+// Image (loaded from disk, not the thumbnail), videos via
+// VideoPlayerView which wraps AVPlayerViewController and layers a
+// frame-step row on top of the stock AVKit transport. Both share a
+// chrome of caption (read-only for v1) and a delete affordance.
 //
 // State stays local to the sheet — when the user deletes, we tombstone
 // via the Store, call onDeleted, and the inspector's reload pulls the
@@ -85,8 +85,7 @@ struct AttachmentViewerSheet: View {
             case .photo:
                 photoView(url: loadedURL)
             case .video:
-                VideoPlayer(player: AVPlayer(url: loadedURL))
-                    .ignoresSafeArea(edges: .horizontal)
+                VideoPlayerView(url: loadedURL)
             }
         } else {
             ProgressView().tint(.white)
