@@ -491,7 +491,8 @@ final class PeerSync: NSObject {
             )
         case .blobResponse(let resp):
             await handleBlobResponse(
-                resp, peerName: peerName, bytes: data.count, start: start
+                resp, fromPeer: peerID, peerName: peerName,
+                bytes: data.count, start: start
             )
         }
     }
@@ -509,9 +510,14 @@ final class PeerSync: NSObject {
         guard let store else { return }
         do {
             let hash = Self.contentHash(of: snapshot)
-            // Skip if we already have this exact content — covers the
-            // ping-pong case where the peer is echoing back state we
-            // already sent.
+            // Skip the merge if we already have this exact content —
+            // covers the ping-pong case where the peer is echoing back
+            // state we already sent. BUT still run blob reconciliation
+            // below: byte-sync state is independent of snapshot content
+            // (peer may have bytes we don't, even when our metadata
+            // agrees), and early-returning here used to strand
+            // attachments whose metadata was in sync before their bytes
+            // had a chance to transfer.
             if hash == lastSentHash {
                 status = .synced(at: Date(), peerCount: peerCount)
                 try? await store.emit(WideEvent(
@@ -524,6 +530,7 @@ final class PeerSync: NSObject {
                         "reason": .string("dedupe"),
                     ]
                 ))
+                await requestMissingBlobs(fromPeer: peerID, peerName: peerName)
                 return
             }
             try await store.merge(snapshot)
@@ -569,8 +576,20 @@ final class PeerSync: NSObject {
 
     // MARK: - Blob reconciliation
 
-    // Receiver side, post-merge: compute what we still need and ask the
-    // sending peer for those hashes. No-op if there's nothing missing.
+    // Receiver-paced blob pull. Ask for ONE missing hash at a time;
+    // re-request from handleBlobResponse after each successful write.
+    //
+    // Why one-at-a-time: the responder loops `handleBlobRequest` over
+    // every hash in the request, loading each file into memory and
+    // handing it to MC's send buffer back-to-back. With many fresh
+    // videos on the sending device, those base64-bloated payloads stack
+    // up in RAM faster than MC drains them and iOS jetsams the app
+    // (Alex hit this returning from a week of capturing). Receiver
+    // pacing bounds peak memory at ~1 blob × ~1.33 (base64) + MC's
+    // single in-flight buffer on both ends — well under the foreground
+    // memory limit even for the largest 1080p clips. True chunked
+    // transport (MCSession.startStream) is still the planned end state
+    // for arbitrarily-large files; this is the bounded interim.
     private func requestMissingBlobs(
         fromPeer peerID: MCPeerID, peerName: String
     ) async {
@@ -579,10 +598,11 @@ final class PeerSync: NSObject {
             let live = try await store.liveContentHashes()
             let onDisk = try await assets.onDiskHashes()
             let needed = live.subtracting(onDisk)
-            // Reset pending each merge cycle — see field doc.
+            // Reset pending so a dropped peer or restart can't strand
+            // the set forever; next merge cycle re-requests from scratch.
             pendingIncomingBlobs = needed
-            guard !needed.isEmpty else { return }
-            let req = PeerMessage.BlobRequest(hashes: Array(needed))
+            guard let next = needed.first else { return }
+            let req = PeerMessage.BlobRequest(hashes: [next])
             let data = try Self.encode(.blobRequest(req))
             try session.send(data, toPeers: [peerID], with: .reliable)
             try? await store.emit(WideEvent(
@@ -590,7 +610,8 @@ final class PeerSync: NSObject {
                 outcome: .ok,
                 fields: [
                     "peer_name": .string(peerName),
-                    "hashes_requested": .int(Int64(needed.count)),
+                    "hashes_requested": .int(1),
+                    "total_pending": .int(Int64(needed.count)),
                 ]
             ))
         } catch {
@@ -624,7 +645,12 @@ final class PeerSync: NSObject {
                     skipped += 1
                     continue
                 }
-                let data = try Data(contentsOf: url)
+                // Mapped read so the file pages in lazily — won't pin
+                // the whole video as RSS before JSONEncoder needs it.
+                // Base64 encode still materialises a ~1.33× copy, but
+                // pairing this with the receiver-paced one-at-a-time
+                // request bounds peak memory predictably.
+                let data = try Data(contentsOf: url, options: .mappedIfSafe)
                 let ext = url.pathExtension
                 let resp = PeerMessage.BlobResponse(
                     hash: hash, ext: ext, data: data
@@ -672,6 +698,7 @@ final class PeerSync: NSObject {
     // wrong bytes under a trusted hash. Drop on mismatch.
     private func handleBlobResponse(
         _ resp: PeerMessage.BlobResponse,
+        fromPeer peerID: MCPeerID,
         peerName: String,
         bytes: Int,
         start: Date
@@ -731,6 +758,11 @@ final class PeerSync: NSObject {
             // re-renders once the bytes land. Cheap signal — the grid
             // will reload from the store + assets folder.
             pullCount &+= 1
+            // Pull the next missing blob, if any. This is the pacing
+            // loop: one blob requested → one written → request next.
+            // Receiver-paced backpressure keeps the responder's send
+            // buffer and our own decode buffer bounded at one payload.
+            await requestMissingBlobs(fromPeer: peerID, peerName: peerName)
         } catch {
             try? await store.emit(WideEvent(
                 op: "peer.blob.receive",
