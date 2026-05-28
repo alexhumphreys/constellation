@@ -93,20 +93,23 @@ enum CanvasCamera {
         )
     }
 
-    // Place `worldPoint` at the horizontal center and `verticalBias` of
-    // the viewport height (0.5 = dead center; lower values lift the
-    // point into the upper half so it isn't hidden by a bottom sheet),
-    // at the given `scale`.
+    // Place `worldPoint` at the center of the visible viewport and the
+    // `verticalBias` fraction of its height, at the given `scale`.
+    // `verticalBias` (0.5 = dead center; lower values lift the point into
+    // the upper half so it isn't hidden by a bottom sheet); `trailingInset`
+    // (points) shifts the horizontal center left so the point clears a
+    // fixed-width side inspector on the trailing edge (iPad).
     static func focusPoint(
         worldPoint: CGPoint,
         scale: CGFloat,
         into size: CGSize,
-        verticalBias: CGFloat
+        verticalBias: CGFloat,
+        trailingInset: CGFloat = 0
     ) -> CameraPose {
         CameraPose(
             scale: scale,
             offset: CGSize(
-                width: size.width / 2 - worldPoint.x * scale,
+                width: (size.width - trailingInset) / 2 - worldPoint.x * scale,
                 height: size.height * verticalBias - worldPoint.y * scale
             )
         )

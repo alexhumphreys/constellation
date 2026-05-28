@@ -80,6 +80,12 @@ struct SkyView: View {
     // so the focused star lands in the upper half — the part not
     // covered by the medium-detent inspector sheet.
     let focusVerticalBias: CGFloat
+    // Width (points) of a trailing-edge inspector covering the canvas
+    // (the iPad side inspector); 0 on iPhone, where the inspector is a
+    // bottom sheet handled by focusVerticalBias instead. Shifts focus
+    // pans left so the targeted star lands in the visible region rather
+    // than behind the inspector.
+    let focusTrailingInset: CGFloat
     // Multi-select state. In select mode, tap toggles a star's id
     // in/out of `multiSelectedIds` instead of opening the inspector,
     // and long-press-drag on a selected star moves the whole group
@@ -103,6 +109,7 @@ struct SkyView: View {
         selectedSkillId: Binding<SkillID?>,
         focusRequest: Binding<FocusRequest?> = .constant(nil),
         focusVerticalBias: CGFloat = 0.5,
+        focusTrailingInset: CGFloat = 0,
         isSelectMode: Bool = false,
         multiSelectedIds: Binding<Set<SkillID>> = .constant([]),
         onCanvasGesture: @escaping () -> Void = {}
@@ -121,6 +128,7 @@ struct SkyView: View {
         self._selectedSkillId = selectedSkillId
         self._focusRequest = focusRequest
         self.focusVerticalBias = focusVerticalBias
+        self.focusTrailingInset = focusTrailingInset
         self.isSelectMode = isSelectMode
         self._multiSelectedIds = multiSelectedIds
         self.onCanvasGesture = onCanvasGesture
@@ -836,7 +844,8 @@ struct SkyView: View {
             worldPoint: CGPoint(x: skill.x, y: skill.y),
             scale: targetScale,
             into: size,
-            verticalBias: focusVerticalBias
+            verticalBias: focusVerticalBias,
+            trailingInset: focusTrailingInset
         )
         animateFocus(to: target)
         focusRequest = nil

@@ -76,6 +76,11 @@ struct RootView: View {
 
     @Environment(\.horizontalSizeClass) private var sizeClass
 
+    // Width of the iPad side inspector. Shared between the inspector's
+    // own frame and the focus-pan trailing inset so a select-to-pan
+    // lands the star in the visible canvas, not behind the inspector.
+    private let padInspectorWidth: CGFloat = 420
+
     var body: some View {
         Group {
             if sizeClass == .compact {
@@ -142,17 +147,17 @@ struct RootView: View {
                 // in-flight fade so the next TRACE renders crisply.
                 chainTrace.clear()
             }
-            // On iPhone, the inspector covers the bottom half of the
-            // canvas — pan the newly-selected star into the visible
-            // upper half. preserveScale=true so a tap doesn't snap
-            // zoom on top of the translate; only the translation
-            // matters here since the user already sees the star.
+            // The inspector covers part of the canvas — the bottom half
+            // on iPhone (medium sheet), the trailing 420pt on iPad — so
+            // pan the newly-selected star into the still-visible region.
+            // SkyView's focusVerticalBias / focusTrailingInset aim the
+            // pan at that region's centroid. preserveScale=true so a tap
+            // doesn't snap zoom on top of the translate; only the
+            // translation matters since the user already sees the star.
             // Skip if pendingFocusRequest is already set (AddSheet /
             // SearchSheet already queued a focus and we don't want
             // to fight them).
-            if sizeClass == .compact,
-               let newValue,
-               pendingFocusRequest == nil {
+            if let newValue, pendingFocusRequest == nil {
                 pendingFocusRequest = FocusRequest(
                     skillId: newValue,
                     preserveScale: true
@@ -336,7 +341,7 @@ struct RootView: View {
                         reloadToken &+= 1
                     }
                 )
-                .frame(width: 420)
+                .frame(width: padInspectorWidth)
                 .background(Theme.Sky.bg2.opacity(0.96))
                 .transition(.move(edge: .trailing).combined(with: .opacity))
             }
@@ -435,6 +440,12 @@ struct RootView: View {
             // of the canvas; aim focus animations at the upper-half
             // centroid so the focused star isn't hidden by the sheet.
             focusVerticalBias: sizeClass == .compact ? 0.25 : 0.5,
+            // iPad's side inspector covers the trailing 420pt; shift the
+            // focus pan left by that much so a select-to-pan lands the
+            // star in the visible canvas. Zero while in select mode (no
+            // inspector) or on iPhone (bottom sheet, handled above).
+            focusTrailingInset: (sizeClass != .compact && !isSelectMode)
+                ? padInspectorWidth : 0,
             isSelectMode: isSelectMode,
             multiSelectedIds: $selectedSkillIds,
             // Pan or pinch clears a lingering chain trace — the
