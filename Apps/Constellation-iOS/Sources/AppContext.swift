@@ -15,15 +15,21 @@ final class AppContext {
     let store: Store
     let assets: AssetStore
     let peerSync = PeerSync()
+    // App-scoped media import driver. Owns import Tasks so they survive
+    // the inspector being closed mid-flight; see ImportCoordinator.
+    let importer: ImportCoordinator
 
     init() throws {
         let url = Self.storeURL()
         Self.logger.info("opening store at \(url.path, privacy: .public)")
-        self.store = try Store(url: url, sink: OSLogSink())
+        let store = try Store(url: url, sink: OSLogSink())
+        self.store = store
         let assetsRoot = url
             .deletingLastPathComponent()
             .appendingPathComponent("assets", isDirectory: true)
-        self.assets = try AssetStore(root: assetsRoot)
+        let assets = try AssetStore(root: assetsRoot)
+        self.assets = assets
+        self.importer = ImportCoordinator(assets: assets, store: store)
     }
 
     func seedIfEmpty() async throws {

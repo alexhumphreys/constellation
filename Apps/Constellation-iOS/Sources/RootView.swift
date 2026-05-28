@@ -79,6 +79,32 @@ struct RootView: View {
             }
         }
         .task(id: reloadToken) { await reload() }
+        // App-wide import feedback. Lives here, not in the inspector, so
+        // a success/failure banner shows even after the inspector that
+        // started the import has been closed. Auto-dismisses; a fresh
+        // toast restarts the timer via the keyed .task.
+        .overlay(alignment: .bottom) {
+            if let toast = context.importer.toast {
+                Button {
+                    if let skill = skills.first(where: { $0.id == toast.skillId }) {
+                        focusOnSearchResult(skill)
+                    }
+                    context.importer.toast = nil
+                } label: {
+                    importToast(toast)
+                }
+                .buttonStyle(.plain)
+                .padding(.bottom, 48)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .task(id: toast.id) {
+                    try? await Task.sleep(for: .seconds(2.5))
+                    if !Task.isCancelled {
+                        context.importer.toast = nil
+                    }
+                }
+            }
+        }
+        .animation(.easeOut(duration: 0.25), value: context.importer.toast?.id)
         // Every local mutation bumps reloadToken — piggyback on that to
         // queue a peer push. PeerSync internally debounces so drag-to-
         // move's per-frame bumps collapse to one network send.
@@ -88,6 +114,13 @@ struct RootView: View {
         // A successful inbound merge bumps pullCount; refresh the UI so
         // peer changes appear without the user pulling-to-refresh.
         .onChange(of: context.peerSync.pullCount) { _, _ in
+            reloadToken &+= 1
+        }
+        // An app-scoped media import finished an item — refresh so the
+        // canvas picks up the new cover moons (the import may have
+        // completed after the inspector was closed). This also kicks a
+        // peer push via the reloadToken handler above.
+        .onChange(of: context.importer.completedCount) { _, _ in
             reloadToken &+= 1
         }
         // Navigating to a different skill invalidates the chain overlay
@@ -216,6 +249,34 @@ struct RootView: View {
         }
     }
 
+    // Glass capsule banner for import success/failure, styled to match
+    // the canvas chrome (reset-view / `+` buttons).
+    @ViewBuilder
+    private func importToast(_ toast: ImportCoordinator.Toast) -> some View {
+        HStack(spacing: 8) {
+            Image(
+                systemName: toast.isError
+                    ? "exclamationmark.triangle.fill"
+                    : "checkmark.circle.fill"
+            )
+            .foregroundStyle(toast.isError ? Color.orange : Theme.Sky.chain)
+            Text(toast.message)
+                .font(.system(size: 13, weight: .medium, design: .serif))
+                .foregroundStyle(Theme.Sky.star)
+            Image(systemName: "chevron.right")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.4))
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(
+            Capsule()
+                .fill(Theme.Sky.bg3)
+                .overlay(Capsule().stroke(.white.opacity(0.14), lineWidth: 1))
+        )
+        .shadow(color: .black.opacity(0.45), radius: 12, y: 4)
+    }
+
     // ── iPad layout: canvas + side inspector on selection ──
     private var padLayout: some View {
         ZStack(alignment: .topLeading) {
@@ -258,6 +319,7 @@ struct RootView: View {
                     chainActive: chainTrace.targetId == skill.id,
                     store: context.store,
                     assets: context.assets,
+                    importer: context.importer,
                     onClose: { self.selectedSkillId = nil },
                     onSelect: { self.selectedSkillId = $0 },
                     onMutation: { reloadToken &+= 1 },
@@ -324,6 +386,7 @@ struct RootView: View {
                     chainActive: chainTrace.targetId == skill.id,
                     store: context.store,
                     assets: context.assets,
+                    importer: context.importer,
                     onClose: { selectedSkillId = nil },
                     onSelect: { selectedSkillId = $0 },
                     onMutation: { reloadToken &+= 1 },

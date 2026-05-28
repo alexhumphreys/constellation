@@ -22,6 +22,9 @@ struct SkillDetailView: View {
     let chainActive: Bool
     let store: Store
     let assets: AssetStore
+    // App-scoped import driver. Owns the import Task + per-skill spinner
+    // state so closing this inspector mid-import doesn't drop feedback.
+    let importer: ImportCoordinator
 
     private var areasById: [AreaID: Area] {
         Dictionary(uniqueKeysWithValues: allAreas.map { ($0.id, $0) })
@@ -66,13 +69,11 @@ struct SkillDetailView: View {
     // don't need a separate boolean.
     @State private var editingNote: Note? = nil
     // Attachment sheet state — picker on `showAttachmentPicker`,
-    // fullscreen viewer on a non-nil `viewingAttachment`. `importing`
-    // gates the ADD button while PHPicker results are being re-encoded
-    // and written to disk (can take a moment for a 30s video).
+    // fullscreen viewer on a non-nil `viewingAttachment`. Import progress
+    // and errors live on `importer` (app-scoped) so they survive this
+    // inspector being dismissed mid-import.
     @State private var showAttachmentPicker: Bool = false
     @State private var viewingAttachment: Attachment? = nil
-    @State private var importing: Bool = false
-    @State private var importError: String? = nil
 
     private var graph: SkillGraph { SkillGraph(allSkills) }
 
@@ -93,6 +94,12 @@ struct SkillDetailView: View {
         }
         .scrollDismissesKeyboard(.interactively)
         .task(id: skill.id) { await reload() }
+        // An app-scoped import finished an item — refresh so the grid
+        // reveals it (the import may have completed while a different
+        // skill, or no skill, was open).
+        .onChange(of: importer.completedCount) { _, _ in
+            Task { await reload() }
+        }
         .sheet(isPresented: $showPrereqPicker) {
             PrereqPickerSheet(
                 skill: skill,
@@ -153,8 +160,7 @@ struct SkillDetailView: View {
         .sheet(isPresented: $showAttachmentPicker) {
             AttachmentPicker { results in
                 showAttachmentPicker = false
-                guard !results.isEmpty else { return }
-                Task { await importPicked(results) }
+                importer.importPicked(results, for: skill.id)
             }
             .ignoresSafeArea()
         }
@@ -189,14 +195,6 @@ struct SkillDetailView: View {
                     onMutation()
                 }
             )
-        }
-        .alert("Import failed", isPresented: Binding(
-            get: { importError != nil },
-            set: { if !$0 { importError = nil } }
-        )) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(importError ?? "")
         }
     }
 
@@ -617,7 +615,7 @@ struct SkillDetailView: View {
                     .tracking(1.6)
                     .foregroundStyle(.white.opacity(0.45))
                 Spacer()
-                if importing {
+                if importer.isImporting(skill.id) {
                     ProgressView()
                         .scaleEffect(0.7)
                         .tint(.white.opacity(0.7))
@@ -636,7 +634,7 @@ struct SkillDetailView: View {
                         .foregroundStyle(.white.opacity(0.75))
                 }
                 .buttonStyle(.plain)
-                .disabled(importing)
+                .disabled(importer.isImporting(skill.id))
             }
             if attachments.isEmpty {
                 Text("None yet — tap ADD to attach a photo or video from your library.")
@@ -662,29 +660,6 @@ struct SkillDetailView: View {
                 }
             }
         }
-    }
-
-    // PHPicker handed us N items; import them sequentially so we don't
-    // saturate the device with concurrent video transcodes. UI shows a
-    // spinner via `importing` until the last one lands.
-    private func importPicked(_ results: [PHPickerResult]) async {
-        importing = true
-        defer { importing = false }
-        let importer = AttachmentImporter(assets: assets, store: store)
-        for result in results {
-            do {
-                _ = try await importer.importPicked(result, for: skill.id)
-            } catch {
-                await MainActor.run {
-                    importError = "Couldn't import: \(error.localizedDescription)"
-                }
-                // Continue with the rest — a single bad item shouldn't
-                // abort the batch. The user sees the alert; partial
-                // success still leaves the good items attached.
-            }
-        }
-        await reload()
-        onMutation()
     }
 
     // MARK: - Notes
