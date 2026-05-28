@@ -158,11 +158,11 @@ struct SkyView: View {
     // propagating. Cleared by `.onChange(of: skills)`.
     @State private var positionOverrides: [SkillID: CGPoint] = [:]
 
-    // Frame-ticking task driving the focus pan/zoom animation. Held so a
-    // fresh focus request can pre-empt one already in flight, and the
-    // gesture surface can cancel it the moment the user touches the
-    // canvas (their input should always win over a queued camera move).
-    @State private var focusAnimationTask: Task<Void, Never>? = nil
+    // Drives the focus pan/zoom animation. A fresh focus request pre-empts
+    // one already in flight (animate cancels prior), and the gesture
+    // surface cancels it the moment the user touches the canvas (their
+    // input should always win over a queued camera move).
+    @State private var focusAnimator = CanvasValueAnimator()
 
     // Passed to SkyBloom for petal sizing — iPad's regular width earns a
     // bigger bloom at peak zoom (see SkyBloom.peakPetalSize).
@@ -624,8 +624,7 @@ struct SkyView: View {
                         // User grabbed the canvas — abort any focus pan
                         // already in flight so they're not fighting a
                         // queued camera move with their fingers.
-                        focusAnimationTask?.cancel()
-                        focusAnimationTask = nil
+                        focusAnimator.cancel()
                         onCanvasGesture()
                     }
                 )
@@ -821,37 +820,22 @@ struct SkyView: View {
         focusRequest = nil
     }
 
-    // Frame-by-frame lerp of scale + offset. `withAnimation` looks like
-    // the right tool but doesn't work here: SwiftUI's animation system
-    // interpolates animatable view modifiers, not @State reads inside a
-    // Canvas content closure — so a withAnimation block snaps the
-    // transform in a single body re-eval and the camera *jumps* to the
-    // target. (Same constraint that drives startChainFadeOut over in
-    // RootView.) Manual ticking is the only way to actually see the pan.
+    // Lerp scale + offset to the target over 0.3s. Driven by
+    // CanvasValueAnimator (frame-by-frame) rather than withAnimation,
+    // which interpolates animatable view modifiers, not values read
+    // inside a Canvas content closure — withAnimation would snap the
+    // transform in a single body re-eval and the camera would *jump*.
     private func animateFocus(to target: CameraPose) {
-        focusAnimationTask?.cancel()
         let start = CameraPose(scale: scale, offset: offset)
-        if start == target {
-            focusAnimationTask = nil
+        guard start != target else {
+            focusAnimator.cancel()
             return
         }
-        let duration: TimeInterval = 0.3
-        let frameInterval: UInt64 = 16_666_667  // ~60Hz, nanoseconds
-        let startTime = Date.now
-        focusAnimationTask = Task { @MainActor in
-            while !Task.isCancelled {
-                let elapsed = Date.now.timeIntervalSince(startTime)
-                if elapsed >= duration {
-                    setCamera(target)
-                    break
-                }
-                let eased = CanvasCamera.easeInOut(CGFloat(elapsed / duration))
-                setCamera(CanvasCamera.lerp(from: start, to: target, t: eased))
-                try? await Task.sleep(nanoseconds: frameInterval)
-            }
-            if Task.isCancelled { return }
-            focusAnimationTask = nil
-        }
+        focusAnimator.animate(
+            duration: 0.3,
+            easing: CanvasCamera.easeInOut,
+            onFrame: { setCamera(CanvasCamera.lerp(from: start, to: target, t: $0)) }
+        )
     }
 
     private func fitToBox(_ box: CGRect, padding: CGFloat, into size: CGSize) {

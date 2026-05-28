@@ -23,10 +23,10 @@ final class ChainTrace {
     // canvas multiplies its gold-edge alphas by this.
     private(set) var opacity: Double = 1.0
 
-    // Cancellable task that finalizes a fade-out by clearing targetId and
-    // resetting opacity. Stored so a new trace (or instant clear) can
-    // pre-empt one already in flight.
-    @ObservationIgnored private var fadeTask: Task<Void, Never>?
+    // Drives the fade-out (frame-by-frame; see CanvasValueAnimator for
+    // why withAnimation can't). A new trace or an instant clear cancels
+    // it; beginFadeOut skips if one is already running.
+    @ObservationIgnored private let fadeAnimator = CanvasValueAnimator()
 
     // Resolved BFS backward chain for the active target, materialised as
     // a Set so SkyView's per-edge / per-star check is O(1). Empty when no
@@ -43,8 +43,7 @@ final class ChainTrace {
     // returns [] when the toggle turned the trace off.
     @discardableResult
     func toggle(to id: SkillID, in skills: [Skill]) -> [SkillID] {
-        fadeTask?.cancel()
-        fadeTask = nil
+        fadeAnimator.cancel()
         opacity = 1.0
         if targetId == id {
             targetId = nil
@@ -59,8 +58,7 @@ final class ChainTrace {
     // the previous context, not this one, so the next trace renders
     // crisply.
     func clear() {
-        fadeTask?.cancel()
-        fadeTask = nil
+        fadeAnimator.cancel()
         opacity = 1.0
         targetId = nil
     }
@@ -69,35 +67,16 @@ final class ChainTrace {
     // Holding targetId in place during the fade keeps litSkillIds non-
     // empty so the gold overlay has something to multiply opacity
     // against. Re-entrant: if a fade is already in flight, leave it.
-    //
-    // Manual frame-by-frame ticking rather than withAnimation because
-    // SwiftUI's animation system interpolates animatable view modifiers
-    // (.opacity, .scale, etc.) but a plain value read inside Canvas's
-    // content closure isn't one of those — withAnimation would snap the
-    // value to 0 in a single body re-eval and the chain would vanish
-    // instantly. (Same constraint drives SkyView.animateFocus.)
     func beginFadeOut() {
-        guard targetId != nil, fadeTask == nil else { return }
-        let duration: TimeInterval = 2.0
-        let frameInterval: UInt64 = 16_666_667  // ~60Hz, nanoseconds
-        let startTime = Date.now
-        fadeTask = Task { @MainActor in
-            while !Task.isCancelled {
-                let elapsed = Date.now.timeIntervalSince(startTime)
-                if elapsed >= duration {
-                    opacity = 0
-                    break
-                }
-                let t = elapsed / duration
-                // easeOut quadratic: 1 - (1 - t)^2
-                let eased = 1 - (1 - t) * (1 - t)
-                opacity = 1.0 - eased
-                try? await Task.sleep(nanoseconds: frameInterval)
+        guard targetId != nil, !fadeAnimator.isRunning else { return }
+        fadeAnimator.animate(
+            duration: 2.0,
+            easing: { 1 - (1 - $0) * (1 - $0) },  // easeOut quadratic
+            onFrame: { [weak self] eased in self?.opacity = 1.0 - eased },
+            onComplete: { [weak self] in
+                self?.targetId = nil
+                self?.opacity = 1.0
             }
-            if Task.isCancelled { return }
-            targetId = nil
-            opacity = 1.0
-            fadeTask = nil
-        }
+        )
     }
 }
