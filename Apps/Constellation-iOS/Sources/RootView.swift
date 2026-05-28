@@ -33,6 +33,12 @@ struct RootView: View {
     // Backward-chain overlay state + fade animation. See ChainTrace.
     @State private var chainTrace = ChainTrace()
     @State private var reloadToken: Int = 0
+    // Flips true once the first reload completes. The initial reload is
+    // the time-to-content tail of cold launch (it runs after app.launch,
+    // when the store is ready but the canvas hasn't drawn yet), so the
+    // `canvas.reload` event tags it `first=true` to make that slice
+    // queryable alongside `app.launch`.
+    @State private var didFirstReload: Bool = false
     @State private var showAddSheet: Bool = false
     // Multi-select mode: when on, taps toggle stars in/out of
     // `selectedSkillIds`, long-press-drag on a selected star moves the
@@ -648,10 +654,18 @@ struct RootView: View {
     }
 
     private func reload() async {
+        let start = Date()
+        let isFirst = !didFirstReload
         do {
             let fetchedAreas = try await context.store.allAreas()
             let fetchedSkills = try await context.store.skills()
             let fetchedAttachments = try await context.store.allAttachments()
+            // Store reads done — the canvas can draw from here. The
+            // thumbnail/strip prefetch below happens after the paint and
+            // fills moons in progressively, so splitting fetch from
+            // prefetch separates "time to stars on screen" from "time to
+            // media decoded".
+            let fetchMs = Date().timeIntervalSince(start) * 1000
             // Newest-N attachments per skill (allAttachments is ordered
             // newest-first). Becomes SkyView's coversBySkillId — drives
             // the zoom-LOD bloom of moons (up to 5 visible at peak zoom)
@@ -697,12 +711,37 @@ struct RootView: View {
             await coverCache.evict(except: coverHashes)
             await stripCache.prefetch(hashes: stripHashes, from: context.assets)
             await stripCache.evict(except: stripHashes)
+            let totalMs = Date().timeIntervalSince(start) * 1000
+            didFirstReload = true
+            try? await context.store.emit(WideEvent(
+                op: "canvas.reload",
+                outcome: .ok,
+                durationMs: totalMs,
+                fields: [
+                    "first": .bool(isFirst),
+                    "fetch_ms": .double(fetchMs),
+                    "prefetch_ms": .double(totalMs - fetchMs),
+                    "areas": .int(Int64(fetchedAreas.count)),
+                    "skills": .int(Int64(fetchedSkills.count)),
+                    "attachments": .int(Int64(fetchedAttachments.count)),
+                    "cover_hashes": .int(Int64(coverHashes.count)),
+                    "strip_hashes": .int(Int64(stripHashes.count)),
+                ]
+            ))
         } catch {
             // Failure to refresh shouldn't crash the canvas — leave the
-            // last good state on screen. A future toast could surface
-            // this, but the constellation is read-mostly so the
-            // user-visible impact of a transient read failure is low.
-            print("reload failed: \(error)")
+            // last good state on screen. Surface it as a wide event so a
+            // silent read failure on the primary data path is at least
+            // visible in the journal / Console.
+            try? await context.store.emit(WideEvent(
+                op: "canvas.reload",
+                outcome: .error,
+                durationMs: Date().timeIntervalSince(start) * 1000,
+                fields: [
+                    "first": .bool(isFirst),
+                    "error": .string(String(describing: error)),
+                ]
+            ))
         }
     }
 }

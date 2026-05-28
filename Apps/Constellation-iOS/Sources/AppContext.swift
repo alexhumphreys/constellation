@@ -32,11 +32,16 @@ final class AppContext {
         self.importer = ImportCoordinator(assets: assets, store: store)
     }
 
-    func seedIfEmpty() async throws {
+    // Returns the number of skills seeded — 0 when the store already had
+    // data (so the launch event can flag a cold first-run seed and record
+    // how much work it was).
+    @discardableResult
+    func seedIfEmpty() async throws -> Int {
         let areas = try await store.allAreas()
-        guard areas.isEmpty else { return }
+        guard areas.isEmpty else { return 0 }
         Self.logger.info("empty store; seeding from SeedData")
-        try await store.merge(SeedData.snapshot())
+        let stats = try await store.merge(SeedData.snapshot())
+        return stats.skills
     }
 
     // Start MultipeerConnectivity sync once the local store has been
@@ -46,7 +51,7 @@ final class AppContext {
         peerSync.start(store: store, assets: assets)
     }
 
-    static func storeURL() -> URL {
+    nonisolated static func storeURL() -> URL {
         let docs = FileManager.default.urls(
             for: .documentDirectory, in: .userDomainMask
         ).first ?? URL.documentsDirectory
