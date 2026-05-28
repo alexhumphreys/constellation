@@ -1,3 +1,4 @@
+import QuartzCore
 import SwiftUI
 import UIKit
 
@@ -47,6 +48,13 @@ struct CanvasGestureSurface: UIViewRepresentable {
         let view = TouchView()
         view.backgroundColor = .clear
         view.isMultipleTouchEnabled = true
+        // Kill any in-flight momentum glide the instant a new finger
+        // lands — before any recognizer has even decided what the
+        // gesture is — so a follow-up tap/pan/pinch/long-press grabs
+        // control without fighting the decaying camera.
+        view.onTouchDown = { [weak coordinator = context.coordinator] in
+            coordinator?.cancelMomentum()
+        }
 
         let pan = UIPanGestureRecognizer(
             target: context.coordinator,
@@ -58,7 +66,6 @@ struct CanvasGestureSurface: UIViewRepresentable {
         pan.maximumNumberOfTouches = 2
         pan.delegate = context.coordinator
         view.addGestureRecognizer(pan)
-        context.coordinator.pan = pan
 
         let pinch = UIPinchGestureRecognizer(
             target: context.coordinator,
@@ -106,6 +113,10 @@ struct CanvasGestureSurface: UIViewRepresentable {
         Coordinator(parent: self)
     }
 
+    static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
+        coordinator.tearDown()
+    }
+
     // MARK: - Coordinator
 
     final class Coordinator: NSObject, UIGestureRecognizerDelegate {
@@ -117,23 +128,66 @@ struct CanvasGestureSurface: UIViewRepresentable {
         private var pinchStartScale: CGFloat = 1.0
         private var pinchAnchorWorld: CGPoint = .zero
         private var pinchActive: Bool = false
+        // Touch count at the last pinch tick — a change means a finger
+        // was added/removed mid-pinch, which needs an anchor re-baseline.
+        private var lastPinchTouchCount: Int = 0
 
         // Drag state. While `draggingActive` is true, the pan handler
         // consumes its translation and bails so we don't move the
         // canvas underneath the star at the same time.
         weak var longPress: UILongPressGestureRecognizer?
-        weak var pan: UIPanGestureRecognizer?
         weak var tap: UITapGestureRecognizer?
         private var draggingActive: Bool = false
-        private var autoPanLink: CADisplayLink?
+        private let autoPan = DisplayLinkDriver()
         // Most recent finger location in view coords, refreshed each
         // long-press tick and read by the display-link callback so
         // edge auto-pan doesn't need its own gesture handle.
         private var lastDragLocation: CGPoint = .zero
         private weak var hostView: UIView?
 
+        // Pan momentum (flick-to-glide). Velocity is captured from UIPan
+        // on .ended and decayed frame-by-frame until it falls below a
+        // stop threshold. Updates offset + bgPan exactly like a live pan,
+        // so the parallax background keeps drifting through the glide.
+        private let momentum = DisplayLinkDriver()
+        private var momentumVelocity: CGPoint = .zero
+        private var momentumLastTime: CFTimeInterval = 0
+
+        // Tracks UIPan's touch count across ticks so we can swallow the
+        // translation spike when a finger is added or lifted — the
+        // tracked centroid jumps between the 2-finger average and the
+        // lone finger, and that delta would otherwise land in one tick
+        // as a visible snap. Replaces the old pinch-.ended translation
+        // reset, which only caught the pinch→pan transition and raced
+        // the pan handler to do it.
+        private var lastPanTouchCount: Int = 0
+        // True once this pan gesture has actually moved the canvas (a
+        // real one/two-finger pan, not a suppressed star-drag or a pure
+        // pinch). Gates momentum so lifting fingers off a pinch or a
+        // star-drag can't fling the camera.
+        private var panMovedCanvas: Bool = false
+
+        // Momentum tuning. decelerationPerMs mirrors UIScrollView's
+        // normal rate (~0.998/ms); the rest are felt-tuned starting
+        // points — adjust on device. minFling: below this a release
+        // reads as a deliberate stop, not a flick. stopSpeed: end the
+        // glide once it slows to a crawl. maxFling: clamp a violent
+        // flick so it can't shoot across the whole world.
+        private static let decelerationPerMs: Double = 0.998
+        private static let minFlingSpeed: CGFloat = 120   // pt/s
+        private static let stopSpeed: CGFloat = 40        // pt/s
+        private static let maxFlingSpeed: CGFloat = 8000  // pt/s
+
         init(parent: CanvasGestureSurface) {
             self.parent = parent
+        }
+
+        // Invalidate both display links. Called from dismantleUIView when
+        // SwiftUI tears the surface down — the links retain their driver
+        // until invalidated, so this is what breaks that cycle.
+        func tearDown() {
+            autoPan.stop()
+            momentum.stop()
         }
 
         // Let pan and pinch fire on the same touches. This is the line
@@ -165,8 +219,20 @@ struct CanvasGestureSurface: UIViewRepresentable {
             }
             switch g.state {
             case .began:
+                lastPanTouchCount = g.numberOfTouches
+                panMovedCanvas = false
                 parent.onCanvasGestureBegan()
             case .changed:
+                // A finger added/lifted collapses UIPan's tracked
+                // centroid between the 2-finger average and the lone
+                // finger; that delta lands in this tick's translation as
+                // a visible jump. Swallow the tick that straddles the
+                // change and re-anchor, so the next tick measures clean.
+                if g.numberOfTouches != lastPanTouchCount {
+                    lastPanTouchCount = g.numberOfTouches
+                    g.setTranslation(.zero, in: g.view)
+                    return
+                }
                 let t = g.translation(in: g.view)
                 // Pinch handler already moves `offset` to track the
                 // gesture centroid (including any two-finger drift), so
@@ -178,10 +244,19 @@ struct CanvasGestureSurface: UIViewRepresentable {
                 if !pinchActive {
                     parent.offset.width  += t.x
                     parent.offset.height += t.y
+                    panMovedCanvas = true
                 }
                 parent.bgPan.width  += t.x
                 parent.bgPan.height += t.y
                 g.setTranslation(.zero, in: g.view)
+            case .ended:
+                // Flick → glide. Only for a real pan (not a pinch tail
+                // or a suppressed star-drag, both of which leave
+                // panMovedCanvas false), and only above a min speed so a
+                // slow release reads as a deliberate stop.
+                if panMovedCanvas && !pinchActive {
+                    startMomentum(velocity: g.velocity(in: g.view))
+                }
             default:
                 break
             }
@@ -193,16 +268,32 @@ struct CanvasGestureSurface: UIViewRepresentable {
             switch g.state {
             case .began:
                 pinchActive = true
-                pinchStartScale = parent.scale
-                let anchor = g.location(in: g.view)
-                // World point under the gesture's starting centroid.
-                pinchAnchorWorld = CGPoint(
-                    x: (anchor.x - parent.offset.width)  / pinchStartScale,
-                    y: (anchor.y - parent.offset.height) / pinchStartScale
-                )
+                lastPinchTouchCount = g.numberOfTouches
+                capturePinchAnchor(g)
                 parent.onCanvasGestureBegan()
 
             case .changed:
+                // Dropped to a single touch (the other finger lifted):
+                // leave pinch mode rather than re-anchor the world point
+                // onto the lone finger — that re-anchor was the visible
+                // "snap to the remaining finger". With pinchActive off the
+                // pan handler drives the remaining finger, giving the
+                // Maps-style pan-after-pinch. (Pan's own numberOfTouches
+                // guard absorbs the centroid jump on the way down.)
+                guard g.numberOfTouches >= 2 else {
+                    pinchActive = false
+                    lastPinchTouchCount = g.numberOfTouches
+                    return
+                }
+                // (Re)entering two-finger mode, or the touch count changed
+                // while pinching: re-baseline anchor + scale so resuming
+                // after a one-finger pan (or adding/removing a finger)
+                // doesn't jump the world out from under the fingers.
+                if !pinchActive || g.numberOfTouches != lastPinchTouchCount {
+                    pinchActive = true
+                    capturePinchAnchor(g)
+                }
+                lastPinchTouchCount = g.numberOfTouches
                 // location(in:) returns the *current* centroid, which
                 // tracks the fingers as they move — that's how pan
                 // composes with pinch without a separate handler.
@@ -218,16 +309,24 @@ struct CanvasGestureSurface: UIViewRepresentable {
 
             case .ended, .cancelled, .failed:
                 pinchActive = false
-                // Fingers almost never lift in the same instant — one
-                // comes off first, which collapses UIPan's tracked
-                // centroid from "avg of 2 fingers" to "position of the
-                // remaining finger". Without this reset, that 20–80pt
-                // delta leaks into the next pan tick as a visible snap.
-                pan?.setTranslation(.zero, in: g.view)
 
             default:
                 break
             }
+        }
+
+        // Snapshot the world point under the current two-finger centroid
+        // and reset the recognizer's cumulative scale to 1, so subsequent
+        // .changed ticks solve offset/scale relative to *now*. Called at
+        // pinch .began and again whenever the touch set changes mid-pinch.
+        private func capturePinchAnchor(_ g: UIPinchGestureRecognizer) {
+            pinchStartScale = parent.scale
+            g.scale = 1.0
+            let anchor = g.location(in: g.view)
+            pinchAnchorWorld = CGPoint(
+                x: (anchor.x - parent.offset.width)  / parent.scale,
+                y: (anchor.y - parent.offset.height) / parent.scale
+            )
         }
 
         // MARK: tap
@@ -285,22 +384,15 @@ struct CanvasGestureSurface: UIViewRepresentable {
         // MARK: edge auto-pan
 
         private func startAutoPanIfNeeded() {
-            guard autoPanLink == nil else { return }
-            let link = CADisplayLink(
-                target: self, selector: #selector(autoPanTick)
-            )
-            // .common so it keeps firing while UIKit is tracking
-            // touches (default mode would pause during tracking).
-            link.add(to: .main, forMode: .common)
-            autoPanLink = link
+            guard !autoPan.isRunning else { return }
+            autoPan.start { [weak self] _ in self?.autoPanTick() }
         }
 
         private func stopAutoPan() {
-            autoPanLink?.invalidate()
-            autoPanLink = nil
+            autoPan.stop()
         }
 
-        @objc private func autoPanTick() {
+        private func autoPanTick() {
             guard draggingActive, let view = hostView else { return }
             let bounds = view.bounds
             // Inset = how close to the edge the finger has to be
@@ -339,13 +431,108 @@ struct CanvasGestureSurface: UIViewRepresentable {
         ) -> CGFloat {
             Swift.min(range.upperBound, Swift.max(range.lowerBound, v))
         }
+
+        // MARK: pan momentum
+
+        private func startMomentum(velocity v: CGPoint) {
+            let speed = magnitude(v)
+            guard speed > Self.minFlingSpeed else {
+                cancelMomentum()
+                return
+            }
+            momentumVelocity = clampMagnitude(v, to: Self.maxFlingSpeed)
+            momentumLastTime = CACurrentMediaTime()
+            momentum.start { [weak self] link in self?.momentumTick(link) }
+        }
+
+        // Cancel mid-glide (a fresh touch landed, or the gesture surface
+        // is going away). Leaves the camera wherever the glide reached.
+        func cancelMomentum() {
+            momentum.stop()
+            momentumVelocity = .zero
+        }
+
+        private func momentumTick(_ link: CADisplayLink) {
+            let now = link.timestamp
+            let dt = now - momentumLastTime
+            momentumLastTime = now
+            guard dt > 0 else { return }
+            // Cap the advance step so a dropped frame / stall can't
+            // teleport the canvas; decay still uses the true elapsed
+            // time so the velocity is correct after the hitch.
+            let step = CGFloat(Swift.min(dt, 1.0 / 30.0))
+            parent.offset.width  += momentumVelocity.x * step
+            parent.offset.height += momentumVelocity.y * step
+            parent.bgPan.width   += momentumVelocity.x * step
+            parent.bgPan.height  += momentumVelocity.y * step
+            // UIScrollView models deceleration as velocity *= rate^millis
+            // — frame-rate independent, so the feel holds at 60 or 120Hz.
+            let decay = CGFloat(pow(Self.decelerationPerMs, dt * 1000))
+            momentumVelocity.x *= decay
+            momentumVelocity.y *= decay
+            if magnitude(momentumVelocity) < Self.stopSpeed {
+                cancelMomentum()
+            }
+        }
+
+        private func magnitude(_ v: CGPoint) -> CGFloat {
+            (v.x * v.x + v.y * v.y).squareRoot()
+        }
+
+        private func clampMagnitude(_ v: CGPoint, to maxSpeed: CGFloat) -> CGPoint {
+            let speed = magnitude(v)
+            guard speed > maxSpeed else { return v }
+            let k = maxSpeed / speed
+            return CGPoint(x: v.x * k, y: v.y * k)
+        }
     }
 }
 
 // UIView subclass whose only job is to swallow hit-tests for the area
 // it covers so the gesture recognizers attached to it actually receive
 // touches. A plain UIView with `.clear` backgroundColor *does* receive
-// touches in this configuration, but subclassing also gives us a
-// single place to intervene later (e.g. forward unhandled touches to
-// a child) without surprising anyone.
-private final class TouchView: UIView {}
+// touches in this configuration, but subclassing also gives us a hook
+// for raw finger-down (used to cancel pan momentum the instant a touch
+// lands, before any recognizer has decided what the gesture is).
+private final class TouchView: UIView {
+    var onTouchDown: () -> Void = {}
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesBegan(touches, with: event)
+        onTouchDown()
+    }
+}
+
+// Thin wrapper around CADisplayLink so the canvas's frame-ticked loops
+// (edge auto-pan during a drag, pan momentum after a flick) share one
+// create / add-to-runloop / invalidate path instead of each hand-rolling
+// it. Owns a single link; `start` replaces any already in flight. The
+// frame closure should capture its owner weakly — the link retains this
+// driver (via target/selector) until `stop`, so the owner must call
+// `stop` from deinit to break that cycle.
+private final class DisplayLinkDriver {
+    private var link: CADisplayLink?
+    private var onFrame: ((CADisplayLink) -> Void)?
+
+    var isRunning: Bool { link != nil }
+
+    func start(_ onFrame: @escaping (CADisplayLink) -> Void) {
+        stop()
+        self.onFrame = onFrame
+        let link = CADisplayLink(target: self, selector: #selector(tick(_:)))
+        // .common so it keeps firing while UIKit is tracking touches
+        // (the default runloop mode would pause during tracking).
+        link.add(to: .main, forMode: .common)
+        self.link = link
+    }
+
+    func stop() {
+        link?.invalidate()
+        link = nil
+        onFrame = nil
+    }
+
+    @objc private func tick(_ link: CADisplayLink) {
+        onFrame?(link)
+    }
+}
