@@ -11,6 +11,12 @@ import Foundation
 // move. RootView owns the skill data and the hobby-filter; this owns the
 // trace target and its opacity. Held by RootView as @State so SwiftUI
 // observes targetId / opacity reads in the canvas bindings.
+//
+// Lives at Sources/ root rather than in Canvas/ because RootView owns it
+// and it's feature-state that *feeds* the canvas (as plain data), not a
+// renderer. It could arguably live in Canvas/ as the chain-overlay
+// controller — judgment call; left here so Canvas/ stays "things that
+// draw/handle the sky."
 @MainActor
 @Observable
 final class ChainTrace {
