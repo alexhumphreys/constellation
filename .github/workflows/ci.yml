@@ -17,3 +17,52 @@ jobs:
         run: swift build --package-path Core
       - name: Test
         run: swift test --package-path Core
+
+  ios-test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install xcodegen
+        run: brew install xcodegen
+      # The .xcodeproj is gitignored and regenerated from project.yml.
+      - name: Generate Xcode project
+        working-directory: Apps/Constellation-iOS
+        run: xcodegen generate
+      # The runner's default Xcode is 16.4, but the app's Swift 6.2
+      # concurrency (MainActor isolation, AVFoundation Sendable) only
+      # compiles on Xcode 26.x — match the local toolchain by selecting
+      # the newest 26.x the image ships.
+      - name: Select Xcode 26
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$XCODE" ]; then
+            echo "No Xcode 26.x found on runner" >&2
+            ls -d /Applications/Xcode_*.app >&2
+            exit 1
+          fi
+          echo "Selecting $XCODE"
+          sudo xcode-select -s "$XCODE"
+      - name: Show toolchain
+        run: xcodebuild -version
+      # Pick whatever iPhone simulator the runner's Xcode ships rather
+      # than hardcoding a name, so this survives runner image / Xcode
+      # bumps. The app's iOS 18 deployment target builds fine on any
+      # iOS >= 18 runtime, which every Xcode 16+ image provides.
+      - name: Pick a simulator
+        id: sim
+        run: |
+          UDID=$(xcrun simctl list devices available -j \
+            | jq -r '[.devices[][] | select(.name | startswith("iPhone")) | .udid] | last')
+          if [ -z "$UDID" ] || [ "$UDID" = "null" ]; then
+            echo "No available iPhone simulator found" >&2
+            xcrun simctl list devices available >&2
+            exit 1
+          fi
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+      - name: Run iOS unit tests
+        run: |
+          xcodebuild test \
+            -project Apps/Constellation-iOS/Constellation-iOS.xcodeproj \
+            -scheme Constellation-iOS \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.udid }}" \
+            -skipPackagePluginValidation
