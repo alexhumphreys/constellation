@@ -30,18 +30,8 @@ struct RootView: View {
     @State private var stripCache = StripCache()
     @State private var activeHobbies: Set<AreaID> = []
     @State private var selectedSkillId: SkillID? = nil
-    // Target of an active backward-chain overlay (nil = no trace).
-    // Nullified whenever the user navigates away from the trace target
-    // so the chain can't outlive the context that explains it.
-    @State private var chainSkillId: SkillID? = nil
-    // Visual fade factor for the chain overlay. Animated 1→0 on canvas
-    // gestures so the trace fades out instead of dropping instantly;
-    // chainSkillId is cleared after the animation completes.
-    @State private var chainOpacity: Double = 1.0
-    // Cancellable task that finalizes a chain fade-out by clearing
-    // chainSkillId and resetting chainOpacity. Stored so a new chain
-    // (or instant-clear) can pre-empt an in-flight fade cleanly.
-    @State private var chainFadeTask: Task<Void, Never>? = nil
+    // Backward-chain overlay state + fade animation. See ChainTrace.
+    @State private var chainTrace = ChainTrace()
     @State private var reloadToken: Int = 0
     @State private var showAddSheet: Bool = false
     // Multi-select mode: when on, taps toggle stars in/out of
@@ -107,14 +97,11 @@ struct RootView: View {
         // referring to it, and clears on the next canvas gesture
         // via onCanvasGesture below.
         .onChange(of: selectedSkillId) { _, newValue in
-            if let newValue, newValue != chainSkillId {
+            if let newValue, newValue != chainTrace.targetId {
                 // Selecting a different skill is an intent change —
                 // drop the previous chain instantly and pre-empt any
                 // in-flight fade so the next TRACE renders crisply.
-                chainFadeTask?.cancel()
-                chainFadeTask = nil
-                chainOpacity = 1.0
-                chainSkillId = nil
+                chainTrace.clear()
             }
             // On iPhone, the inspector covers the bottom half of the
             // canvas — pan the newly-selected star into the visible
@@ -268,7 +255,7 @@ struct RootView: View {
                     area: areas.first { $0.id == skill.areaId },
                     allSkills: skills,
                     allAreas: areas,
-                    chainActive: chainSkillId == skill.id,
+                    chainActive: chainTrace.targetId == skill.id,
                     store: context.store,
                     assets: context.assets,
                     onClose: { self.selectedSkillId = nil },
@@ -334,7 +321,7 @@ struct RootView: View {
                     area: areas.first { $0.id == skill.areaId },
                     allSkills: skills,
                     allAreas: areas,
-                    chainActive: chainSkillId == skill.id,
+                    chainActive: chainTrace.targetId == skill.id,
                     store: context.store,
                     assets: context.assets,
                     onClose: { selectedSkillId = nil },
@@ -365,8 +352,8 @@ struct RootView: View {
             skills: visibleSkills,
             areas: areas,
             initialFocus: initialFocus,
-            chainSkillIds: chainSkillIds,
-            chainHighlightOpacity: chainOpacity,
+            chainSkillIds: chainTrace.litSkillIds(in: skills),
+            chainHighlightOpacity: chainTrace.opacity,
             coversBySkillId: coversBySkillId,
             attachmentCountsBySkillId: attachmentCountsBySkillId,
             coverCache: coverCache,
@@ -383,12 +370,9 @@ struct RootView: View {
             multiSelectedIds: $selectedSkillIds,
             // Pan or pinch clears a lingering chain trace — the
             // overlay is meant to explain a specific selection, not
-            // float around indefinitely. Fade out over 2s instead
-            // of dropping instantly; chainSkillId is held in place
-            // until the fade completes so the chainSkillIds set
-            // stays non-empty and the gold overlay can interpolate
-            // its alpha down to zero.
-            onCanvasGesture: { startChainFadeOut() }
+            // float around indefinitely. ChainTrace fades it out over
+            // 2s instead of dropping instantly (see beginFadeOut).
+            onCanvasGesture: { chainTrace.beginFadeOut() }
         )
     }
 
@@ -477,74 +461,16 @@ struct RootView: View {
         .accessibilityLabel(isSelectMode ? "Exit select mode" : "Enter select mode")
     }
 
-    // Resolved BFS backward chain for the active target, materialised as
-    // a Set so SkyView's per-edge / per-star check is O(1). Empty when
-    // no chain is active. Backward = "what's the path to here" — the
-    // learning-planning move (forward "what does this unlock" is in the
-    // graph if we ever want to toggle).
-    private var chainSkillIds: Set<SkillID> {
-        guard let id = chainSkillId else { return [] }
-        return Set(SkillGraph(skills).backwardChain(from: id))
-    }
-
     private func toggleChain(for id: SkillID) {
-        // Explicit toggles are instant — cancel any in-flight fade
-        // and reset the opacity so a re-toggle doesn't ramp up from
-        // a half-faded state.
-        chainFadeTask?.cancel()
-        chainFadeTask = nil
-        chainOpacity = 1.0
-        if chainSkillId == id {
-            chainSkillId = nil
-            return
-        }
-        chainSkillId = id
+        let chain = chainTrace.toggle(to: id, in: skills)
         // Make sure every area the chain crosses is visible — otherwise
         // a hidden hobby would silently truncate the trace and the user
         // would see a chain that doesn't actually reach where it comes from.
-        let chain = SkillGraph(skills).backwardChain(from: id)
         let bySkillId = Dictionary(uniqueKeysWithValues: skills.map { ($0.id, $0) })
         for sid in chain {
             if let skill = bySkillId[sid] {
                 activeHobbies.insert(skill.areaId)
             }
-        }
-    }
-
-    // Animate the chain trace to invisible over 2s, then drop the
-    // chain target. Holding chainSkillId in place during the fade
-    // keeps chainSkillIds non-empty so the gold overlay has something
-    // to multiply chainOpacity against. Re-entrant: if a fade is
-    // already in flight, leave it alone.
-    //
-    // Manual frame-by-frame ticking rather than withAnimation because
-    // SwiftUI's animation system interpolates animatable view modifiers
-    // (.opacity, .scale, etc.) but a plain @State Double read inside
-    // Canvas's content closure isn't one of those — withAnimation
-    // would snap the value to 0 in a single body re-eval and the
-    // chain would vanish instantly.
-    private func startChainFadeOut() {
-        guard chainSkillId != nil, chainFadeTask == nil else { return }
-        let duration: TimeInterval = 2.0
-        let frameInterval: UInt64 = 16_666_667  // ~60Hz, nanoseconds
-        let startTime = Date.now
-        chainFadeTask = Task { @MainActor in
-            while !Task.isCancelled {
-                let elapsed = Date.now.timeIntervalSince(startTime)
-                if elapsed >= duration {
-                    chainOpacity = 0
-                    break
-                }
-                let t = elapsed / duration
-                // easeOut quadratic: 1 - (1 - t)^2
-                let eased = 1 - (1 - t) * (1 - t)
-                chainOpacity = 1.0 - eased
-                try? await Task.sleep(nanoseconds: frameInterval)
-            }
-            if Task.isCancelled { return }
-            chainSkillId = nil
-            chainOpacity = 1.0
-            chainFadeTask = nil
         }
     }
 
