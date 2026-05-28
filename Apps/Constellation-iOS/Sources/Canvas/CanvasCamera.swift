@@ -130,6 +130,13 @@ enum CanvasCamera {
     static func easeInOut(_ t: CGFloat) -> CGFloat {
         (3 - 2 * t) * t * t
     }
+
+    // easeOut cubic: 1 - (1-t)³. Fast out of the gate, decelerating to a
+    // stop — the deceleration profile a flicked-and-gliding object wants.
+    static func easeOut(_ t: CGFloat) -> CGFloat {
+        let u = 1 - t
+        return 1 - u * u * u
+    }
 }
 
 extension CGFloat {

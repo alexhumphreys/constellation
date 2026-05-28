@@ -96,6 +96,15 @@ struct CanvasCameraTests {
         #expect(abs(CanvasCamera.easeInOut(0.5) - 0.5) < 1e-9)
     }
 
+    @Test("easeOut pins endpoints and decelerates (past halfway by the midpoint)")
+    func easeOutShape() {
+        #expect(CanvasCamera.easeOut(0) == 0)
+        #expect(CanvasCamera.easeOut(1) == 1)
+        // 1 - 0.5³ = 0.875: most of the travel happens early, then it
+        // eases to a stop.
+        #expect(abs(CanvasCamera.easeOut(0.5) - 0.875) < 1e-9)
+    }
+
     @Test("lerp returns the bounds at t=0 and t=1")
     func lerpEndpoints() {
         let a = CameraPose(scale: 1, offset: .zero)

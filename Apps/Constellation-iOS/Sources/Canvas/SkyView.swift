@@ -164,12 +164,32 @@ struct SkyView: View {
     // input should always win over a queued camera move).
     @State private var focusAnimator = CanvasValueAnimator()
 
+    // Drives the star-flick glide (see endDrag). Reuses the eased
+    // frame-ticker; flickActive guards the settle-on-completion path so
+    // an interrupting gesture can commit the star where it currently is.
+    @State private var flickAnimator = CanvasValueAnimator()
+    @State private var flickActive = false
+
     // Passed to SkyBloom for petal sizing — iPad's regular width earns a
     // bigger bloom at peak zoom (see SkyBloom.peakPetalSize).
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     private let world = CGSize(width: 2400, height: 1600)
     private let zoomBounds: ClosedRange<CGFloat> = 0.15...8.00
+
+    // --- Star flick (flick a star and let it glide to a stop) ---------
+    // Single toggle: set `starFlickEnabled = false` to disable and the
+    // drag reverts to snap-on-lift (everything below the flag goes
+    // inert). The glide is screen-space-consistent: a given flick speed
+    // travels the same on-screen distance at any zoom.
+    private static let starFlickEnabled = true
+    // World-space speeds (px/s at zoom 1). Felt-tuned starting points.
+    private static let flickMinSpeed: CGFloat = 220     // below → no glide
+    private static let flickStopSpeed: CGFloat = 70     // glide ends here
+    // Per-second velocity retention; -ln gives the decay rate, so 0.05 ⇒
+    // ~0.33s time-constant. Lower = shorter glide.
+    private static let flickRetentionPerSec: CGFloat = 0.05
+    private static let flickMaxDuration: TimeInterval = 1.0
 
     // Bloom geometry + drawing live in SkyBloom.swift; the body calls
     // SkyBloom.draw for the petal pass.
@@ -617,14 +637,16 @@ struct SkyView: View {
                     onDragChanged: { location in
                         updateDrag(at: location)
                     },
-                    onDragEnded: {
-                        endDrag()
+                    onDragEnded: { velocity in
+                        endDrag(screenVelocity: velocity)
                     },
                     onCanvasGestureBegan: {
                         // User grabbed the canvas — abort any focus pan
                         // already in flight so they're not fighting a
-                        // queued camera move with their fingers.
+                        // queued camera move with their fingers, and
+                        // commit any star still gliding from a flick.
                         focusAnimator.cancel()
+                        cancelFlick()
                         onCanvasGesture()
                     }
                 )
@@ -858,6 +880,8 @@ struct SkyView: View {
     private func handleTap(
         at location: CGPoint, in size: CGSize, transform: CanvasTransform
     ) {
+        // A tap during a glide stops it and commits, then selects as usual.
+        cancelFlick()
         let bestId = hitTest(at: location, transform: transform)
         if isSelectMode {
             // Multi-select: tap a star toggles it in/out of the set,
@@ -933,6 +957,9 @@ struct SkyView: View {
     private func beginDrag(
         at location: CGPoint, transform: CanvasTransform
     ) -> Bool {
+        // A new grab interrupts any in-flight flick — commit the gliding
+        // star before this drag re-seeds the baselines.
+        cancelFlick()
         guard let hit = hitTest(at: location, transform: transform) else {
             return false
         }
@@ -975,19 +1002,80 @@ struct SkyView: View {
         )
     }
 
-    // On finger lift: freeze the resolved positions into
-    // `positionOverrides` so the canvas keeps drawing them at the
-    // drag-end coords while the async upsert + parent reload
-    // propagate. The overrides are cleared by .onChange(of: skills)
-    // once new data lands — that's the only safe moment, because
-    // clearing earlier would re-render against the still-stale
+    // On finger lift. With star flick off (default), settle immediately
+    // (snap to a stop). With it on and the release fast enough, hand off
+    // to a decaying glide first; the glide settles on completion.
+    private func endDrag(screenVelocity: CGPoint) {
+        guard !dragBaselines.isEmpty else { return }
+        let scale = effectiveTransform.scale
+        // Finger velocity in world units. glide·scale is scale-invariant,
+        // so a given flick travels the same on-screen distance at any zoom.
+        let worldVel = CGPoint(
+            x: scale > 0 ? screenVelocity.x / scale : 0,
+            y: scale > 0 ? screenVelocity.y / scale : 0
+        )
+        let speed = (worldVel.x * worldVel.x + worldVel.y * worldVel.y).squareRoot()
+        if Self.starFlickEnabled, speed > Self.flickMinSpeed {
+            startFlick(worldVelocity: worldVel, speed: speed)
+        } else {
+            settleDrag()
+        }
+    }
+
+    // Glide the dragged star(s) on from the lift position with an
+    // ease-out matched to an exponential velocity decay, then settle.
+    // dragBaselines stays populated through the glide so the canvas keeps
+    // rendering the moving star(s); only dragDelta animates.
+    private func startFlick(worldVelocity v: CGPoint, speed: CGFloat) {
+        let k = Double(Self.flickRetentionPerSec)
+        let lnk = log(k)                              // negative
+        let stopOverSpeed = Double(Self.flickStopSpeed / speed)
+        let tStop = log(stopOverSpeed) / lnk
+        let duration = min(max(tStop, 0.12), Self.flickMaxDuration)
+        // Displacement of an exponentially-decaying velocity over [0,tStop]:
+        //   ∫ v·k^t dt = v·(k^tStop − 1)/ln k = v·(stopSpeed/speed − 1)/ln k
+        let factor = CGFloat((stopOverSpeed - 1) / lnk)
+        let startDelta = dragDelta
+        let endDelta = CGSize(
+            width: startDelta.width + v.x * factor,
+            height: startDelta.height + v.y * factor
+        )
+        flickActive = true
+        flickAnimator.animate(
+            duration: duration,
+            easing: CanvasCamera.easeOut,
+            onFrame: { t in
+                dragDelta = CGSize(
+                    width: startDelta.width + (endDelta.width - startDelta.width) * t,
+                    height: startDelta.height + (endDelta.height - startDelta.height) * t
+                )
+            },
+            onComplete: { settleDrag() }
+        )
+    }
+
+    // Stop an in-flight glide and commit the star(s) wherever it reached.
+    // No-op when no glide is running. Called by any gesture that should
+    // interrupt the flick (a new drag, a tap, a canvas pan/pinch).
+    private func cancelFlick() {
+        guard flickActive else { return }
+        flickAnimator.cancel()   // leaves dragDelta where it is; no onComplete
+        settleDrag()
+    }
+
+    // Freeze the resolved positions into `positionOverrides` so the
+    // canvas keeps drawing them at the final coords while the async
+    // upsert + parent reload propagate. The overrides are cleared by
+    // .onChange(of: skills) once new data lands — the only safe moment,
+    // since clearing earlier would re-render against the still-stale
     // skill.x/y and pop the stars back.
-    private func endDrag() {
+    private func settleDrag() {
         let baselines = dragBaselines
         let delta = dragDelta
         dragBaselines = [:]
         dragAnchorWorld = .zero
         dragDelta = .zero
+        flickActive = false
         guard !baselines.isEmpty, delta != .zero else {
             // No-movement long-press → nothing to commit; star stays
             // wherever it already was.

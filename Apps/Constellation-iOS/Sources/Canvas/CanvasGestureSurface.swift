@@ -38,7 +38,10 @@ struct CanvasGestureSurface: UIViewRepresentable {
     // each tick, so edge auto-pan composes cleanly.
     let onDragBegan: (CGPoint) -> Bool
     let onDragChanged: (CGPoint) -> Void
-    let onDragEnded: () -> Void
+    // Fired on touch-lift. The CGPoint is the finger's screen-space
+    // velocity (pt/s) at release, for star flick — zero on a
+    // cancelled/failed drag and on a release with no recent motion.
+    let onDragEnded: (CGPoint) -> Void
     // Fired once at the start of any user-driven canvas gesture
     // (pan or pinch). Used by the host to dismiss transient overlays
     // — chain trace, etc. — without needing to watch offset/scale.
@@ -144,6 +147,11 @@ struct CanvasGestureSurface: UIViewRepresentable {
         // edge auto-pan doesn't need its own gesture handle.
         private var lastDragLocation: CGPoint = .zero
         private weak var hostView: UIView?
+        // Recent (location, time) samples during a star drag, used to
+        // compute the finger's release velocity for star flick. Trimmed
+        // to a short trailing window each tick.
+        private var dragSamples: [(loc: CGPoint, t: CFTimeInterval)] = []
+        private static let flickVelocityWindow: CFTimeInterval = 0.08
 
         // Pan momentum (flick-to-glide). Velocity is captured from UIPan
         // on .ended and decayed frame-by-frame until it falls below a
@@ -349,6 +357,7 @@ struct CanvasGestureSurface: UIViewRepresentable {
                 if parent.onDragBegan(loc) {
                     draggingActive = true
                     lastDragLocation = loc
+                    dragSamples = [(loc, CACurrentMediaTime())]
                     hostView = g.view
                     startAutoPanIfNeeded()
                     // Cancel any in-flight tap on the same touches.
@@ -368,17 +377,51 @@ struct CanvasGestureSurface: UIViewRepresentable {
             case .changed:
                 guard draggingActive else { return }
                 lastDragLocation = loc
+                recordDragSample(loc)
                 parent.onDragChanged(loc)
 
-            case .ended, .cancelled, .failed:
+            case .ended:
                 guard draggingActive else { return }
                 draggingActive = false
                 stopAutoPan()
-                parent.onDragEnded()
+                recordDragSample(loc)
+                parent.onDragEnded(dragReleaseVelocity())
+
+            case .cancelled, .failed:
+                guard draggingActive else { return }
+                draggingActive = false
+                stopAutoPan()
+                parent.onDragEnded(.zero)
 
             default:
                 break
             }
+        }
+
+        // Append a drag sample and drop anything older than the velocity
+        // window so dragReleaseVelocity only ever sees recent motion.
+        private func recordDragSample(_ loc: CGPoint) {
+            let now = CACurrentMediaTime()
+            dragSamples.append((loc, now))
+            let cutoff = now - Self.flickVelocityWindow
+            while dragSamples.count > 2, dragSamples.first!.t < cutoff {
+                dragSamples.removeFirst()
+            }
+        }
+
+        // Finger velocity (pt/s) over the trailing sample window. Zero if
+        // there isn't enough recent motion to measure — a slow release or
+        // a press-and-hold then lift reads as a deliberate stop, not a
+        // flick.
+        private func dragReleaseVelocity() -> CGPoint {
+            guard let last = dragSamples.last, let first = dragSamples.first,
+                  dragSamples.count >= 2 else { return .zero }
+            let dt = last.t - first.t
+            guard dt > 0 else { return .zero }
+            return CGPoint(
+                x: (last.loc.x - first.loc.x) / dt,
+                y: (last.loc.y - first.loc.y) / dt
+            )
         }
 
         // MARK: edge auto-pan
