@@ -28,6 +28,20 @@ jobs:
       - name: Generate Xcode project
         working-directory: Apps/Constellation-iOS
         run: xcodegen generate
+      # The runner's default Xcode is 16.4, but the app's Swift 6.2
+      # concurrency (MainActor isolation, AVFoundation Sendable) only
+      # compiles on Xcode 26.x — match the local toolchain by selecting
+      # the newest 26.x the image ships.
+      - name: Select Xcode 26
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$XCODE" ]; then
+            echo "No Xcode 26.x found on runner" >&2
+            ls -d /Applications/Xcode_*.app >&2
+            exit 1
+          fi
+          echo "Selecting $XCODE"
+          sudo xcode-select -s "$XCODE"
       - name: Show toolchain
         run: xcodebuild -version
       # Pick whatever iPhone simulator the runner's Xcode ships rather
