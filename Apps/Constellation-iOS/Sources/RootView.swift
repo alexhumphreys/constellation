@@ -52,6 +52,11 @@ struct RootView: View {
     // area center and immediately get lost behind existing stars. SkyView
     // clears the binding once the focus animation kicks off.
     @State private var pendingFocusRequest: FocusRequest? = nil
+    // Set when the user taps an attachment petal on the canvas: selects
+    // the petal's skill (opening its inspector) and hands the attachment
+    // id down so SkillDetailView opens its fullscreen viewer once its
+    // attachments load. Cleared by the inspector after it presents.
+    @State private var pendingAttachmentId: AttachmentID? = nil
     // Snapshot share sheet (export → AirDrop). URL is set after the
     // background JSON write finishes; presentation is bound to its
     // presence so the sheet only opens once the file actually exists.
@@ -331,6 +336,8 @@ struct RootView: View {
                     store: context.store,
                     assets: context.assets,
                     importer: context.importer,
+                    openAttachmentId: pendingAttachmentId,
+                    onAttachmentOpened: { pendingAttachmentId = nil },
                     onClose: { self.selectedSkillId = nil },
                     onSelect: { self.selectedSkillId = $0 },
                     onMutation: { reloadToken &+= 1 },
@@ -398,6 +405,8 @@ struct RootView: View {
                     store: context.store,
                     assets: context.assets,
                     importer: context.importer,
+                    openAttachmentId: pendingAttachmentId,
+                    onAttachmentOpened: { pendingAttachmentId = nil },
                     onClose: { selectedSkillId = nil },
                     onSelect: { selectedSkillId = $0 },
                     onMutation: { reloadToken &+= 1 },
@@ -452,7 +461,13 @@ struct RootView: View {
             // overlay is meant to explain a specific selection, not
             // float around indefinitely. ChainTrace fades it out over
             // 2s instead of dropping instantly (see beginFadeOut).
-            onCanvasGesture: { chainTrace.beginFadeOut() }
+            onCanvasGesture: { chainTrace.beginFadeOut() },
+            // Tapping an attachment petal: open the skill, then ask its
+            // inspector to surface that attachment's viewer.
+            onOpenAttachment: { skillId, attachmentId in
+                selectedSkillId = skillId
+                pendingAttachmentId = attachmentId
+            }
         )
     }
 

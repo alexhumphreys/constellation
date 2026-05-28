@@ -21,9 +21,12 @@ enum SkyBloom {
     //
     // Petal size and ring radius both grow with zoom: at scale ≤
     // bloomBaseScale the bloom uses the compact legacy geometry and
-    // interpolates linearly to the expanded geometry at bloomPeakScale
-    // (= the zoom ceiling), giving the user more room to look at photos
-    // as they lean in.
+    // interpolates linearly to the expanded geometry at bloomPeakScale,
+    // giving the user more room to look at photos as they lean in. The
+    // geometry *caps* at bloomPeakScale — the canvas zoom ceiling sits
+    // above it (see SkyView.zoomBounds), so zooming further spreads
+    // neighbouring stars apart without enlarging their petals, letting
+    // the user dolly past two stars whose blooms overlap.
     static let basePetalSize: CGFloat = 40
     static let basePetalRadius: CGFloat = 38
     static let bloomBaseScale: CGFloat = 1.6
@@ -148,6 +151,51 @@ enum SkyBloom {
                 }
             }
         }
+    }
+
+    // Hit-test a tap against the visible petal ring. Mirrors draw()'s
+    // geometry exactly (same petalSize / offsets / LOD-alpha gating) so a
+    // tap only resolves to a petal the user can actually see. Returns the
+    // skill + attachment of the nearest petal whose center is within half
+    // a petal of the finger, plus that distance — the caller compares it
+    // against the nearest star so overlapping blooms from neighbouring
+    // stars (and the star sitting under its own ring) disambiguate by
+    // which target the finger is closest to.
+    //
+    // @MainActor for the same reason draw() is — it reads the AttachmentImporter
+    // constants and runs from the SkyView tap handler, already on main.
+    @MainActor
+    static func hitTest(
+        at location: CGPoint,
+        skills: [Skill],
+        transform: CanvasTransform,
+        coversBySkillId: [SkillID: [AttachmentCover]],
+        regularWidth: Bool,
+        worldPosition: (Skill) -> CGPoint
+    ) -> (skillId: SkillID, attachmentId: AttachmentID, dist: CGFloat)? {
+        guard transform.scale > petalLODBands[0].0 else { return nil }
+        let petalSize = petalSize(at: transform.scale, regularWidth: regularWidth)
+        let offsets = petalOffsets(at: transform.scale, regularWidth: regularWidth)
+        let hitRadius = petalSize / 2
+        var best: (skillId: SkillID, attachmentId: AttachmentID, dist: CGFloat)?
+        for skill in skills {
+            guard let covers = coversBySkillId[skill.id] else { continue }
+            let w = worldPosition(skill)
+            let p = transform.apply(w.x, w.y)
+            for (idx, cover) in covers.prefix(offsets.count).enumerated() {
+                let (start, end) = petalLODBands[idx]
+                let alpha = max(0, min(1, (transform.scale - start) / (end - start)))
+                if alpha <= 0 { continue }
+                let slot = offsets[idx]
+                let dx = p.x + slot.x - location.x
+                let dy = p.y + slot.y - location.y
+                let dist = (dx * dx + dy * dy).squareRoot()
+                if dist <= hitRadius, dist < (best?.dist ?? .greatestFiniteMagnitude) {
+                    best = (skill.id, cover.id, dist)
+                }
+            }
+        }
+        return best
     }
 
     // Aspect-fill draw of a single petal thumbnail into the given square

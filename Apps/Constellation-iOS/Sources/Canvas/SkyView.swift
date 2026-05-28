@@ -69,6 +69,10 @@ struct SkyView: View {
     // (e.g. the chain trace) so they don't outlive the context that
     // explains them.
     let onCanvasGesture: () -> Void
+    // Fired when the user taps an attachment petal in a star's bloom.
+    // The host selects the skill (opening its inspector) and asks the
+    // inspector to open that attachment's fullscreen viewer.
+    let onOpenAttachment: (SkillID, AttachmentID) -> Void
     @Binding var selectedSkillId: SkillID?
     // When set, pan/zoom to that skill and clear the binding. Lets the
     // parent ask the canvas to recenter on a target after a state change
@@ -112,7 +116,8 @@ struct SkyView: View {
         focusTrailingInset: CGFloat = 0,
         isSelectMode: Bool = false,
         multiSelectedIds: Binding<Set<SkillID>> = .constant([]),
-        onCanvasGesture: @escaping () -> Void = {}
+        onCanvasGesture: @escaping () -> Void = {},
+        onOpenAttachment: @escaping (SkillID, AttachmentID) -> Void = { _, _ in }
     ) {
         self.skills = skills
         self.areas = areas
@@ -132,6 +137,7 @@ struct SkyView: View {
         self.isSelectMode = isSelectMode
         self._multiSelectedIds = multiSelectedIds
         self.onCanvasGesture = onCanvasGesture
+        self.onOpenAttachment = onOpenAttachment
     }
 
     // Canvas transform. Mutated directly by CanvasGestureSurface as
@@ -183,7 +189,14 @@ struct SkyView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     private let world = CGSize(width: 2400, height: 1600)
-    private let zoomBounds: ClosedRange<CGFloat> = 0.15...8.00
+    // Upper bound is deliberately past SkyBloom.bloomPeakScale (8.0): the
+    // bloom's petal size + ring radius cap at that scale, so any zoom
+    // beyond it spreads neighbouring stars apart on screen *without*
+    // growing their petals — letting the user dolly past two close
+    // stars whose blooms overlap until each bloom stands alone. Below
+    // ~bloomPeakScale, overlapping petals still resolve to the nearest
+    // one on tap (see SkyBloom.hitTest).
+    private let zoomBounds: ClosedRange<CGFloat> = 0.15...16.00
 
     // --- Star flick (flick a star and let it glide to a stop) ---------
     // Single toggle: set `starFlickEnabled = false` to disable and the
@@ -891,13 +904,13 @@ struct SkyView: View {
     ) {
         // A tap during a glide stops it and commits, then selects as usual.
         cancelFlick()
-        let bestId = hitTest(at: location, transform: transform)
         if isSelectMode {
             // Multi-select: tap a star toggles it in/out of the set,
-            // tap empty space clears the set. Inspector is suppressed
-            // by the parent while this mode is on so a single tap
-            // can't accidentally open it.
-            if let bestId {
+            // tap empty space clears the set. Petals are inert here —
+            // select mode is about choosing stars to move as a group.
+            // Inspector is suppressed by the parent while this mode is
+            // on so a single tap can't accidentally open it.
+            if let bestId = nearestStar(at: location, transform: transform)?.id {
                 if multiSelectedIds.contains(bestId) {
                     multiSelectedIds.remove(bestId)
                 } else {
@@ -908,21 +921,49 @@ struct SkyView: View {
             }
             return
         }
-        // Tap on background clears selection; tap on a star toggles.
-        if let bestId {
-            selectedSkillId = (selectedSkillId == bestId) ? nil : bestId
+        // Outside select mode the bloom petals are tappable. Resolve the
+        // nearest target — an attachment petal vs. the star under it (or
+        // a neighbour's overlapping petal) — by finger proximity, so
+        // colliding blooms from close-together stars disambiguate to
+        // whatever the finger is actually on. A petal opens its skill +
+        // that attachment; a star toggles its inspector.
+        let petal = SkyBloom.hitTest(
+            at: location,
+            skills: skills,
+            transform: transform,
+            coversBySkillId: coversBySkillId,
+            regularWidth: horizontalSizeClass == .regular,
+            worldPosition: { worldPosition(of: $0) }
+        )
+        let star = nearestStar(at: location, transform: transform)
+        if let petal, petal.dist <= (star?.dist ?? .greatestFiniteMagnitude) {
+            selectedSkillId = petal.skillId
+            onOpenAttachment(petal.skillId, petal.attachmentId)
+            return
+        }
+        if let star {
+            selectedSkillId = (selectedSkillId == star.id) ? nil : star.id
         } else {
             selectedSkillId = nil
         }
     }
 
-    // Linear scan over skills — N is tiny (~50). Pick the nearest star
-    // within a finger-sized screen-space radius regardless of zoom; that
-    // way zoomed-out tiny stars are still hittable.
+    // Star id under the finger, ignoring distance — used by the drag
+    // hit-test, which only ever grabs stars (never petals).
     private func hitTest(
         at location: CGPoint, transform: CanvasTransform
     ) -> SkillID? {
-        var bestId: SkillID? = nil
+        nearestStar(at: location, transform: transform)?.id
+    }
+
+    // Linear scan over skills — N is tiny (~50). Pick the nearest star
+    // within a finger-sized screen-space radius regardless of zoom (so
+    // zoomed-out tiny stars are still hittable) and return its distance
+    // so the tap handler can weigh it against a competing petal hit.
+    private func nearestStar(
+        at location: CGPoint, transform: CanvasTransform
+    ) -> (id: SkillID, dist: CGFloat)? {
+        var best: (id: SkillID, dist: CGFloat)?
         var bestDist: CGFloat = 40  // 40pt = comfortable finger target
         for skill in skills {
             let w = worldPosition(of: skill)
@@ -931,10 +972,10 @@ struct SkyView: View {
             let dist = (dx * dx + dy * dy).squareRoot()
             if dist < bestDist {
                 bestDist = dist
-                bestId = skill.id
+                best = (skill.id, dist)
             }
         }
-        return bestId
+        return best
     }
 
     // MARK: - Drag-to-move

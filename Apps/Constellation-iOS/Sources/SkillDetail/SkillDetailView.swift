@@ -25,6 +25,12 @@ struct SkillDetailView: View {
     // App-scoped import driver. Owns the import Task + per-skill spinner
     // state so closing this inspector mid-import doesn't drop feedback.
     let importer: ImportCoordinator
+    // Non-nil when the user tapped this skill's attachment petal on the
+    // canvas: the viewer for this attachment should open as soon as the
+    // grid has loaded it. Cleared via onAttachmentOpened once presented
+    // so it doesn't re-fire.
+    let openAttachmentId: AttachmentID?
+    let onAttachmentOpened: () -> Void
 
     private var areasById: [AreaID: Area] {
         Dictionary(uniqueKeysWithValues: allAreas.map { ($0.id, $0) })
@@ -94,6 +100,13 @@ struct SkillDetailView: View {
         }
         .scrollDismissesKeyboard(.interactively)
         .task(id: skill.id) { await reload() }
+        // Canvas tapped a petal for a skill that's already open: the view
+        // isn't rebuilt and .task doesn't re-run, so open the viewer from
+        // the already-loaded grid. (The freshly-opened case is handled at
+        // the end of reload, once attachments arrive.)
+        .onChange(of: openAttachmentId) { _, _ in
+            presentPendingAttachment()
+        }
         // An app-scoped import finished an item — refresh so the grid
         // reveals it (the import may have completed while a different
         // skill, or no skill, was open).
@@ -731,6 +744,9 @@ struct SkillDetailView: View {
                 self.notes = n
                 self.clips = c
                 self.attachments = a
+                // A canvas petal tap that opened this skill is waiting on
+                // the grid to load before its viewer can be shown.
+                presentPendingAttachment()
             }
             // Lazy backfill: generate cycling strips for any video
             // attachments that don't have one yet (imported before the
@@ -767,6 +783,18 @@ struct SkillDetailView: View {
                 // thumbnail. No user-facing surface for this.
             }
         }
+    }
+
+    // Open the viewer for a pending petal-tapped attachment, if its row
+    // is loaded. No-op when nothing is pending, the id isn't in this
+    // skill's grid, or a viewer is already up. Clears the request on the
+    // host so it fires exactly once.
+    private func presentPendingAttachment() {
+        guard viewingAttachment == nil,
+              let id = openAttachmentId,
+              let att = attachments.first(where: { $0.id == id }) else { return }
+        viewingAttachment = att
+        onAttachmentOpened()
     }
 
     private func setStatus(_ status: SkillStatus) async {
