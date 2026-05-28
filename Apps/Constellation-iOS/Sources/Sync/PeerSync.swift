@@ -1,5 +1,4 @@
 import ConstellationCore
-import CryptoKit
 import Foundation
 import MultipeerConnectivity
 import SwiftUI
@@ -414,8 +413,8 @@ final class PeerSync: NSObject {
 
         do {
             let snapshot = try await store.snapshot()
-            let data = try Self.encode(PeerMessage.snapshot(snapshot))
-            let hash = Self.contentHash(of: snapshot)
+            let data = try SyncProtocol.encode(PeerMessage.snapshot(snapshot))
+            let hash = SyncProtocol.contentHash(of: snapshot)
             if hash == lastSentHash {
                 // Content unchanged since last successful send — refresh
                 // the timestamp so the pill stays current.
@@ -423,7 +422,7 @@ final class PeerSync: NSObject {
                 try? await store.emit(WideEvent(
                     op: "peer.snapshot.send",
                     outcome: .skipped,
-                    durationMs: Self.ms(since: start),
+                    durationMs: SyncProtocol.ms(since: start),
                     fields: [
                         "peer_count": .int(Int64(peers.count)),
                         "reason": .string("dedupe"),
@@ -437,7 +436,7 @@ final class PeerSync: NSObject {
             try? await store.emit(WideEvent(
                 op: "peer.snapshot.send",
                 outcome: .ok,
-                durationMs: Self.ms(since: start),
+                durationMs: SyncProtocol.ms(since: start),
                 fields: [
                     "peer_count": .int(Int64(peers.count)),
                     "bytes": .int(Int64(data.count)),
@@ -450,7 +449,7 @@ final class PeerSync: NSObject {
             try? await store.emit(WideEvent(
                 op: "peer.snapshot.send",
                 outcome: .error,
-                durationMs: Self.ms(since: start),
+                durationMs: SyncProtocol.ms(since: start),
                 fields: [
                     "peer_count": .int(Int64(peers.count)),
                     "error": .string(String(describing: error)),
@@ -471,12 +470,12 @@ final class PeerSync: NSObject {
         let peerName = peerID.displayName
         let msg: PeerMessage
         do {
-            msg = try Self.decode(data)
+            msg = try SyncProtocol.decode(data)
         } catch {
             try? await store.emit(WideEvent(
                 op: "peer.message.decode",
                 outcome: .error,
-                durationMs: Self.ms(since: start),
+                durationMs: SyncProtocol.ms(since: start),
                 fields: [
                     "peer_name": .string(peerName),
                     "bytes": .int(Int64(data.count)),
@@ -515,7 +514,7 @@ final class PeerSync: NSObject {
     ) async {
         guard let store else { return }
         do {
-            let hash = Self.contentHash(of: snapshot)
+            let hash = SyncProtocol.contentHash(of: snapshot)
             // Skip the merge if we already have this exact content —
             // covers the ping-pong case where the peer is echoing back
             // state we already sent. BUT still run blob reconciliation
@@ -529,7 +528,7 @@ final class PeerSync: NSObject {
                 try? await store.emit(WideEvent(
                     op: "peer.snapshot.receive",
                     outcome: .skipped,
-                    durationMs: Self.ms(since: start),
+                    durationMs: SyncProtocol.ms(since: start),
                     fields: [
                         "peer_name": .string(peerName),
                         "bytes": .int(Int64(bytes)),
@@ -550,7 +549,7 @@ final class PeerSync: NSObject {
             try? await store.emit(WideEvent(
                 op: "peer.snapshot.receive",
                 outcome: .ok,
-                durationMs: Self.ms(since: start),
+                durationMs: SyncProtocol.ms(since: start),
                 fields: [
                     "peer_name": .string(peerName),
                     "bytes": .int(Int64(bytes)),
@@ -570,7 +569,7 @@ final class PeerSync: NSObject {
             try? await store.emit(WideEvent(
                 op: "peer.snapshot.receive",
                 outcome: .error,
-                durationMs: Self.ms(since: start),
+                durationMs: SyncProtocol.ms(since: start),
                 fields: [
                     "peer_name": .string(peerName),
                     "bytes": .int(Int64(bytes)),
@@ -610,7 +609,7 @@ final class PeerSync: NSObject {
             guard let next = needed.first else { return }
             blobRequestSentAt[next] = Date()
             let req = PeerMessage.BlobRequest(hashes: [next])
-            let data = try Self.encode(.blobRequest(req))
+            let data = try SyncProtocol.encode(.blobRequest(req))
             try session.send(data, toPeers: [peerID], with: .reliable)
             try? await store.emit(WideEvent(
                 op: "peer.blob.request",
@@ -663,7 +662,7 @@ final class PeerSync: NSObject {
                 let resp = PeerMessage.BlobResponse(
                     hash: hash, ext: ext, data: data, sentAt: Date()
                 )
-                let encoded = try Self.encode(.blobResponse(resp))
+                let encoded = try SyncProtocol.encode(.blobResponse(resp))
                 try session.send(encoded, toPeers: [peerID], with: .reliable)
                 sent += 1
                 // dur_ms here covers read + JSON+base64 encode + queueing
@@ -674,7 +673,7 @@ final class PeerSync: NSObject {
                 try? await store.emit(WideEvent(
                     op: "peer.blob.send",
                     outcome: .ok,
-                    durationMs: Self.ms(since: blobStart),
+                    durationMs: SyncProtocol.ms(since: blobStart),
                     fields: [
                         "peer_name": .string(peerName),
                         "hash_prefix": .string(String(hash.prefix(12))),
@@ -685,7 +684,7 @@ final class PeerSync: NSObject {
                 try? await store.emit(WideEvent(
                     op: "peer.blob.send",
                     outcome: .error,
-                    durationMs: Self.ms(since: blobStart),
+                    durationMs: SyncProtocol.ms(since: blobStart),
                     fields: [
                         "peer_name": .string(peerName),
                         "hash_prefix": .string(String(hash.prefix(12))),
@@ -697,7 +696,7 @@ final class PeerSync: NSObject {
         try? await store.emit(WideEvent(
             op: "peer.blob.request.served",
             outcome: .ok,
-            durationMs: Self.ms(since: start),
+            durationMs: SyncProtocol.ms(since: start),
             fields: [
                 "peer_name": .string(peerName),
                 "requested": .int(Int64(req.hashes.count)),
@@ -751,7 +750,7 @@ final class PeerSync: NSObject {
             try? await store.emit(WideEvent(
                 op: "peer.blob.receive",
                 outcome: .error,
-                durationMs: Self.ms(since: start),
+                durationMs: SyncProtocol.ms(since: start),
                 fields: fields
             ))
             return
@@ -792,7 +791,7 @@ final class PeerSync: NSObject {
             try? await store.emit(WideEvent(
                 op: "peer.blob.receive",
                 outcome: .ok,
-                durationMs: Self.ms(since: start),
+                durationMs: SyncProtocol.ms(since: start),
                 fields: fields
             ))
             // Bump pullCount so any UI listening on inbound changes
@@ -820,73 +819,10 @@ final class PeerSync: NSObject {
             try? await store.emit(WideEvent(
                 op: "peer.blob.receive",
                 outcome: .error,
-                durationMs: Self.ms(since: start),
+                durationMs: SyncProtocol.ms(since: start),
                 fields: fields
             ))
         }
-    }
-
-    // MARK: - Wire envelope
-
-    // Single Codable envelope for every MC message. Discriminator is
-    // Swift's auto-generated enum-case key, so a snapshot serialises as
-    // `{"snapshot": {...}}`, a blob request as
-    // `{"blobRequest": {"hashes": [...]}}`, etc.
-    //
-    // v1 deliberately uses a single `Data` per blob (base64-encoded
-    // inside the JSON envelope). Adequate for the typical 1080p clip
-    // (~2-15MB after re-encode); see project_next_steps for the
-    // OutputStream-chunked end state planned when video sizes grow.
-    fileprivate enum PeerMessage: Codable, Sendable {
-        case snapshot(ConstellationSnapshot)
-        case blobRequest(BlobRequest)
-        case blobResponse(BlobResponse)
-
-        struct BlobRequest: Codable, Sendable {
-            var hashes: [String]
-        }
-
-        struct BlobResponse: Codable, Sendable {
-            var hash: String
-            // Extension is the source of truth for how to name the file
-            // on disk — sender derives from the existing assets/<hash>.<ext>
-            // entry. We don't carry mimeType because the Attachment row
-            // already has it; the asset file just needs a stable name.
-            var ext: String
-            var data: Data
-            // Sender wall-clock taken just before session.send. Receiver
-            // subtracts from its arrival time to derive wire transit
-            // (encompasses MC's queue + transmission). Optional so older
-            // builds without this field still decode.
-            var sentAt: Date?
-        }
-    }
-
-    private static func encode(_ msg: PeerMessage) throws -> Data {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        return try encoder.encode(msg)
-    }
-
-    private static func decode(_ data: Data) throws -> PeerMessage {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return try decoder.decode(PeerMessage.self, from: data)
-    }
-
-    private static func encode(_ snap: ConstellationSnapshot) throws -> Data {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        return try encoder.encode(snap)
-    }
-
-    // Matches the Store's internal helper so wide-event durations
-    // across both subsystems are computed identically (millis since
-    // operation start, expressed as Double).
-    private static func ms(since start: Date) -> Double {
-        Date().timeIntervalSince(start) * 1000.0
     }
 
     // MARK: - Invitation context
@@ -920,17 +856,6 @@ final class PeerSync: NSObject {
     nonisolated private static func decodeInvitation(_ data: Data?) -> InvitationContext? {
         guard let data else { return nil }
         return try? JSONDecoder().decode(InvitationContext.self, from: data)
-    }
-
-    // Hash the snapshot's *content*, ignoring `generatedAt`. Each call
-    // to Store.snapshot() bumps generatedAt to now, so without zeroing
-    // it the hash would always differ and the dedupe would never fire.
-    private static func contentHash(of snap: ConstellationSnapshot) -> String {
-        var copy = snap
-        copy.generatedAt = .distantPast
-        let data = (try? encode(copy)) ?? Data()
-        let digest = SHA256.hash(data: data)
-        return digest.compactMap { String(format: "%02x", $0) }.joined()
     }
 }
 
