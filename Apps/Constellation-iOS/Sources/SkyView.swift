@@ -164,77 +164,15 @@ struct SkyView: View {
     // canvas (their input should always win over a queued camera move).
     @State private var focusAnimationTask: Task<Void, Never>? = nil
 
-    // iPad gets a substantially bigger bloom at peak zoom — far more
-    // screen real estate to spread into. Compact (phone, or pad in
-    // split view) gets a modest bump over the original 72/78.
+    // Passed to SkyBloom for petal sizing — iPad's regular width earns a
+    // bigger bloom at peak zoom (see SkyBloom.peakPetalSize).
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     private let world = CGSize(width: 2400, height: 1600)
     private let zoomBounds: ClosedRange<CGFloat> = 0.15...8.00
 
-    // Bloom layout — 5 slots at 72° intervals on a ring around the star
-    // center, starting at 36° (just past 12 o'clock, so slot 0 lands
-    // roughly NE — matches the legacy single-moon position). Newest-
-    // first ordering: covers[0] → slot 0, etc. Slots stay in their
-    // fixed angles regardless of how many petals are visible.
-    //
-    // Petal size and ring radius both grow with zoom: at scale ≤
-    // bloomBaseScale the bloom uses the compact legacy geometry, and
-    // it interpolates linearly to the expanded geometry at
-    // bloomPeakScale (= the zoom ceiling). The user can lean in further
-    // and the bloom gives them more room to look at the photos.
-    private static let basePetalSize: CGFloat = 40
-    private static let basePetalRadius: CGFloat = 38
-    private static let bloomBaseScale: CGFloat = 1.6
-    private static let bloomPeakScale: CGFloat = 8.0
-    private static let petalCornerRadius: CGFloat = 6
-    // Unit offsets (radius = 1) for each petal slot. Multiply by the
-    // current ring radius for the actual pt offset. Precomputed to
-    // dodge five sin+cos calls per bloom per frame.
-    private static let petalUnitOffsets: [CGPoint] = [
-        CGPoint(x:  0.5878, y: -0.8090),   //  36°
-        CGPoint(x:  0.9511, y:  0.3090),   // 108°
-        CGPoint(x:  0,      y:  1.0000),   // 180°
-        CGPoint(x: -0.9511, y:  0.3090),   // 252°
-        CGPoint(x: -0.5878, y: -0.8090)    // 324°
-    ]
-
-    private var peakPetalSize: CGFloat {
-        horizontalSizeClass == .regular ? 124 : 84
-    }
-    private var peakPetalRadius: CGFloat {
-        horizontalSizeClass == .regular ? 136 : 92
-    }
-    private func bloomT(at scale: CGFloat) -> CGFloat {
-        max(0, min(1, (scale - Self.bloomBaseScale) / (Self.bloomPeakScale - Self.bloomBaseScale)))
-    }
-    private func petalSize(at scale: CGFloat) -> CGFloat {
-        let t = bloomT(at: scale)
-        return Self.basePetalSize + (peakPetalSize - Self.basePetalSize) * t
-    }
-    private func petalOffsets(at scale: CGFloat) -> [CGPoint] {
-        let t = bloomT(at: scale)
-        let r = Self.basePetalRadius + (peakPetalRadius - Self.basePetalRadius) * t
-        return Self.petalUnitOffsets.map { CGPoint(x: $0.x * r, y: $0.y * r) }
-    }
-    // Per-petal zoom fade windows (start, end). Each petal earns its own
-    // band so the bloom progressively reveals as the user zooms in;
-    // petal 0's 1.2→1.6 band preserves the original single-moon behavior
-    // at moderate zoom for users who never push past it.
-    private static let petalLODBands: [(CGFloat, CGFloat)] = [
-        (1.2, 1.6),
-        (2.2, 2.6),
-        (2.8, 3.2),
-        (3.4, 3.8),
-        (4.0, 4.4)
-    ]
-    // Zoom threshold at which video petals start cycling through their
-    // strip frames on the canvas (vs. showing a static cover). Tuned to
-    // kick in around the time petal 2 is fully visible — the bloom has
-    // earned the user's attention, and motion at lower zoom would feel
-    // busy across many tiny moons.
-    private static let stripCycleZoomThreshold: CGFloat = 3.0
-    private static let stripFrameInterval: TimeInterval = 0.5
+    // Bloom geometry + drawing live in SkyBloom.swift; the body calls
+    // SkyBloom.draw for the petal pass.
 
     var body: some View {
         GeometryReader { geo in
@@ -248,7 +186,7 @@ struct SkyView: View {
             // z-layer as photo petals (below labels). Cost is negligible
             // (the canvas redrew at 60Hz under gesture anyway; 2Hz when
             // idle is nothing).
-            TimelineView(.periodic(from: .now, by: Self.stripFrameInterval)) { timeline in
+            TimelineView(.periodic(from: .now, by: SkyBloom.stripFrameInterval)) { timeline in
             Canvas { context, size in
                 // Solid background fill — the radial-gradient sky is a
                 // future polish item; the flat dark color reads almost
@@ -508,78 +446,24 @@ struct SkyView: View {
                     }
                 }
 
-                // Cover bloom. Each star with attachments shows up to 5
-                // thumbnails in fixed angular slots around it (72°
-                // intervals on a ring whose size grows with zoom — see
-                // petalSize(at:) / petalOffsets(at:)). Petal 0 is the
-                // newest attachment and fades in 1.2→1.6 like the
-                // original single moon; petals 1..4 reveal at
-                // progressively higher zoom (petalLODBands).
-                //
-                // Video petals swap their static thumb for the current
-                // strip frame once scale ≥ stripCycleZoomThreshold — done
-                // inline here (not in a separate overlay) so videos sit
-                // on the same z-layer as photos, below the label layer.
-                // The 2Hz TimelineView wrapping this Canvas (see body)
-                // drives the frame index.
-                //
-                // The 5th petal carries a "+K" badge if the skill has
-                // more than 5 attachments — telegraphs that the bloom
-                // isn't exhaustive.
-                if transform.scale > Self.petalLODBands[0].0 {
-                    let petalSize = petalSize(at: transform.scale)
-                    let offsets = petalOffsets(at: transform.scale)
-                    let stripFrameIdx: Int = {
-                        let elapsed = timeline.date.timeIntervalSinceReferenceDate
-                        return Int(elapsed / Self.stripFrameInterval) % AttachmentImporter.stripFrameCount
-                    }()
-                    let cyclingVideos = transform.scale >= Self.stripCycleZoomThreshold
-                    for skill in skills {
-                        guard let covers = coversBySkillId[skill.id] else { continue }
-                        let w = worldPosition(of: skill)
-                        let p = transform.apply(w.x, w.y)
-                        let totalCount = attachmentCountsBySkillId[skill.id] ?? covers.count
-                        for (idx, cover) in covers.prefix(offsets.count).enumerated() {
-                            let (start, end) = Self.petalLODBands[idx]
-                            let alpha = max(0, min(1, (transform.scale - start) / (end - start)))
-                            if alpha <= 0 { continue }
-                            // Video at high zoom: prefer the current
-                            // strip frame, fall back to the static cover
-                            // if the strip hasn't loaded yet (so we
-                            // never render a blank petal).
-                            let petalImage: UIImage? = {
-                                if cyclingVideos, cover.mediaType == .video,
-                                   let frames = stripCache.frames(for: cover.contentHash),
-                                   stripFrameIdx < frames.count {
-                                    return frames[stripFrameIdx]
-                                }
-                                return coverCache.image(for: cover.contentHash)
-                            }()
-                            guard let uiImage = petalImage else { continue }
-                            let slot = offsets[idx]
-                            let rect = CGRect(
-                                x: p.x + slot.x - petalSize / 2,
-                                y: p.y + slot.y - petalSize / 2,
-                                width: petalSize, height: petalSize
-                            )
-                            Self.drawPetal(
-                                image: uiImage, in: rect, alpha: alpha, context: &context
-                            )
-                            // +K more badge: only on the last slot
-                            // (petal index 4) and only when the skill
-                            // has > 5 attachments. Drawn on top of the
-                            // petal image so it stays legible.
-                            if idx == offsets.count - 1 && totalCount > offsets.count {
-                                Self.drawMoreBadge(
-                                    extra: totalCount - offsets.count,
-                                    in: rect,
-                                    alpha: alpha,
-                                    context: &context
-                                )
-                            }
-                        }
-                    }
-                }
+                // Cover bloom: the ring of attachment thumbnails that
+                // fans out around each star as the user zooms in (LOD-
+                // gated petals, video strip cycling, +K badge). Geometry
+                // and drawing live in SkyBloom; the worldPosition closure
+                // folds in any in-flight drag so petals track a dragged
+                // star, and timeline.date drives the video frame index.
+                SkyBloom.draw(
+                    into: &context,
+                    skills: skills,
+                    transform: transform,
+                    coversBySkillId: coversBySkillId,
+                    attachmentCountsBySkillId: attachmentCountsBySkillId,
+                    coverCache: coverCache,
+                    stripCache: stripCache,
+                    timelineDate: timeline.date,
+                    regularWidth: horizontalSizeClass == .regular,
+                    worldPosition: { worldPosition(of: $0) }
+                )
 
                 // Labels. Smart density: always label foundations,
                 // drilling stars, the currently selected/neighbour set;
@@ -1204,86 +1088,6 @@ struct SkyView: View {
         return dots
     }()
 
-    // Aspect-fill draw of a single petal thumbnail into the given square
-    // rect, clipped to a rounded rect with a faint border stroke. Used
-    // by both the static-cover pass (main Canvas) and the strip-cycle
-    // pass (TimelineView overlay) so they look identical when stacked.
-    private static func drawPetal(
-        image: UIImage,
-        in rect: CGRect,
-        alpha: CGFloat,
-        context: inout GraphicsContext
-    ) {
-        let imgSize = image.size
-        let aspect = imgSize.width / max(imgSize.height, 1)
-        let drawRect: CGRect
-        if aspect >= 1 {
-            let w = rect.width * aspect
-            drawRect = CGRect(
-                x: rect.midX - w / 2,
-                y: rect.minY,
-                width: w, height: rect.height
-            )
-        } else {
-            let h = rect.height / aspect
-            drawRect = CGRect(
-                x: rect.minX,
-                y: rect.midY - h / 2,
-                width: rect.width, height: h
-            )
-        }
-        let resolved = context.resolve(Image(uiImage: image))
-        context.drawLayer { layer in
-            layer.opacity = alpha
-            layer.clip(to: Path(roundedRect: rect, cornerRadius: Self.petalCornerRadius))
-            layer.draw(resolved, in: drawRect)
-        }
-        context.stroke(
-            Path(roundedRect: rect, cornerRadius: Self.petalCornerRadius),
-            with: .color(.white.opacity(0.22 * alpha)),
-            lineWidth: 0.6
-        )
-    }
-
-    // "+K" badge overlaid on the last petal when a skill has more than
-    // 5 attachments. Bottom-right pill, dark scrim + white text — same
-    // visual language as label scrims so it reads as UI chrome rather
-    // than part of the photo.
-    private static func drawMoreBadge(
-        extra: Int,
-        in rect: CGRect,
-        alpha: CGFloat,
-        context: inout GraphicsContext
-    ) {
-        let label = "+\(extra)"
-        let text = Text(label)
-            .font(.system(size: 10, weight: .semibold))
-            .foregroundStyle(Color.white)
-        let resolved = context.resolve(text)
-        let textSize = resolved.measure(in: CGSize(width: 60, height: 20))
-        let padX: CGFloat = 4
-        let padY: CGFloat = 2
-        let badgeWidth = textSize.width + padX * 2
-        let badgeHeight = textSize.height + padY * 2
-        let badgeRect = CGRect(
-            x: rect.maxX - badgeWidth - 2,
-            y: rect.maxY - badgeHeight - 2,
-            width: badgeWidth,
-            height: badgeHeight
-        )
-        context.drawLayer { layer in
-            layer.opacity = alpha
-            layer.fill(
-                Path(roundedRect: badgeRect, cornerRadius: 4),
-                with: .color(.black.opacity(0.65))
-            )
-            layer.draw(
-                resolved,
-                at: CGPoint(x: badgeRect.midX, y: badgeRect.midY),
-                anchor: .center
-            )
-        }
-    }
 }
 
 // Inline deterministic RNG so the background-dot positions don't depend
