@@ -64,6 +64,17 @@ ios-build:
       -skipPackagePluginValidation \
       build
 
+# App-hosted unit tests (CanvasCamera geometry, etc). Needs a concrete
+# simulator destination — `test` can't run on the generic one. Run
+# `just ios-gen` first if you've added/removed test files.
+ios-test:
+    xcodebuild \
+      -project Apps/Constellation-iOS/Constellation-iOS.xcodeproj \
+      -scheme Constellation-iOS \
+      -destination "platform=iOS Simulator,name={{ios-sim}}" \
+      -skipPackagePluginValidation \
+      test
+
 # Phone build + launch on the named simulator. Builds first, then boots
 # the sim and installs/launches the app.
 ios-launch: ios-build

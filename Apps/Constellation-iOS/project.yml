@@ -20,6 +20,11 @@ targets:
     dependencies:
       - package: ConstellationCore
         product: ConstellationCore
+    # Fold the unit-test bundle into the app's auto-generated scheme so
+    # `xcodebuild test -scheme Constellation-iOS` (just ios-test) runs it.
+    scheme:
+      testTargets:
+        - Constellation-iOSTests
     info:
       path: Resources/Info.plist
       properties:
@@ -81,5 +86,27 @@ targets:
         # cert. First device run needs Xcode + -allowProvisioningUpdates.
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: JN69JDJPHH
+        "CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]": NO
+        "CODE_SIGNING_REQUIRED[sdk=iphonesimulator*]": NO
+
+  # App-hosted unit tests. Pure-logic suites (CanvasCamera geometry) that
+  # @testable-import the app to reach its internal types. The app is the
+  # test host (TEST_HOST/BUNDLE_LOADER) because app code lives in the
+  # executable, not a linkable library — runs on a simulator destination.
+  Constellation-iOSTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests
+    dependencies:
+      - target: Constellation-iOS
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        GENERATE_INFOPLIST_FILE: YES
+        TARGETED_DEVICE_FAMILY: "1,2"
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Constellation-iOS.app/Constellation-iOS"
+        BUNDLE_LOADER: "$(TEST_HOST)"
         "CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]": NO
         "CODE_SIGNING_REQUIRED[sdk=iphonesimulator*]": NO
