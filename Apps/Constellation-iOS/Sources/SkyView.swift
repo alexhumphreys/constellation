@@ -858,11 +858,6 @@ struct SkyView: View {
         // them as distinct for method dispatch).
         let bboxW = CGFloat(max((xs.max() ?? 0) - (xs.min() ?? 0), 200))
         let bboxH = CGFloat(max((ys.max() ?? 0) - (ys.min() ?? 0), 200))
-        let fitScale: CGFloat = min(
-            (size.width  * 0.85) / bboxW,
-            (size.height * 0.85) / bboxH
-        )
-        let s = Swift.max(CGFloat(0.60), fitScale).zoomClamped(to: zoomBounds)
         // Centroid of the live cluster — `Area.liveCenter` falls back
         // to the stored centerX/centerY when the area has no skills,
         // but the early-return above means we always have at least one
@@ -870,14 +865,14 @@ struct SkyView: View {
         let center = area?.liveCenter(in: skills)
             ?? (x: xs.reduce(0, +) / Double(xs.count),
                 y: ys.reduce(0, +) / Double(ys.count))
-        let centerX = center.x
-        let centerY = center.y
-        scale = s
-        offset = CGSize(
-            width: size.width / 2 - centerX * s,
-            height: size.height / 2 - centerY * s
-        )
-        bgPan = offset
+        setCamera(CanvasCamera.focusCluster(
+            bboxW: bboxW,
+            bboxH: bboxH,
+            center: CGPoint(x: center.x, y: center.y),
+            into: size,
+            minScale: 0.60,
+            zoomBounds: zoomBounds
+        ))
     }
 
     // MARK: - Reset view
@@ -932,11 +927,13 @@ struct SkyView: View {
         let targetScale: CGFloat = request.preserveScale
             ? scale
             : max(CGFloat(1.0), scale).zoomClamped(to: zoomBounds)
-        let targetOffset = CGSize(
-            width: size.width / 2 - CGFloat(skill.x) * targetScale,
-            height: size.height * focusVerticalBias - CGFloat(skill.y) * targetScale
+        let target = CanvasCamera.focusPoint(
+            worldPoint: CGPoint(x: skill.x, y: skill.y),
+            scale: targetScale,
+            into: size,
+            verticalBias: focusVerticalBias
         )
-        animateFocus(toScale: targetScale, toOffset: targetOffset)
+        animateFocus(to: target)
         focusRequest = nil
     }
 
@@ -947,11 +944,10 @@ struct SkyView: View {
     // transform in a single body re-eval and the camera *jumps* to the
     // target. (Same constraint that drives startChainFadeOut over in
     // RootView.) Manual ticking is the only way to actually see the pan.
-    private func animateFocus(toScale targetScale: CGFloat, toOffset targetOffset: CGSize) {
+    private func animateFocus(to target: CameraPose) {
         focusAnimationTask?.cancel()
-        let startScale = scale
-        let startOffset = offset
-        if startScale == targetScale, startOffset == targetOffset {
+        let start = CameraPose(scale: scale, offset: offset)
+        if start == target {
             focusAnimationTask = nil
             return
         }
@@ -962,22 +958,11 @@ struct SkyView: View {
             while !Task.isCancelled {
                 let elapsed = Date.now.timeIntervalSince(startTime)
                 if elapsed >= duration {
-                    scale = targetScale
-                    offset = targetOffset
-                    bgPan = targetOffset
+                    setCamera(target)
                     break
                 }
-                let t = elapsed / duration
-                // easeInOut cubic: 3t² - 2t³ — gentle on both ends so
-                // the camera doesn't lurch out of rest or slam into the
-                // target.
-                let eased = CGFloat((3 - 2 * t) * t * t)
-                scale = startScale + (targetScale - startScale) * eased
-                offset = CGSize(
-                    width: startOffset.width + (targetOffset.width - startOffset.width) * eased,
-                    height: startOffset.height + (targetOffset.height - startOffset.height) * eased
-                )
-                bgPan = offset
+                let eased = CanvasCamera.easeInOut(CGFloat(elapsed / duration))
+                setCamera(CanvasCamera.lerp(from: start, to: target, t: eased))
                 try? await Task.sleep(nanoseconds: frameInterval)
             }
             if Task.isCancelled { return }
@@ -986,17 +971,18 @@ struct SkyView: View {
     }
 
     private func fitToBox(_ box: CGRect, padding: CGFloat, into size: CGSize) {
-        let availW = size.width - padding * 2
-        let availH = size.height - padding * 2
-        let s = min(availW / box.width, availH / box.height)
-            .zoomClamped(to: zoomBounds)
-        scale = s
-        // Place box center at view center.
-        offset = CGSize(
-            width: size.width / 2 - (box.midX) * s,
-            height: size.height / 2 - (box.midY) * s
-        )
-        bgPan = offset
+        setCamera(CanvasCamera.fit(
+            box: box, padding: padding, into: size, zoomBounds: zoomBounds
+        ))
+    }
+
+    // Snap the camera @State to a computed pose. bgPan mirrors offset so
+    // the parallax background follows programmatic moves (it's only held
+    // back during pinch — see the bgPan docs at the top of the view).
+    private func setCamera(_ pose: CameraPose) {
+        scale = pose.scale
+        offset = pose.offset
+        bgPan = pose.offset
     }
 
     // MARK: - Hit testing
@@ -1082,7 +1068,7 @@ struct SkyView: View {
         guard let hit = hitTest(at: location, transform: transform) else {
             return false
         }
-        let world = screenToWorld(location)
+        let world = transform.invert(location)
         dragAnchorWorld = world
         dragDelta = .zero
         // Prefer the still-held positionOverride over the persisted
@@ -1114,7 +1100,7 @@ struct SkyView: View {
 
     private func updateDrag(at location: CGPoint) {
         guard !dragBaselines.isEmpty else { return }
-        let world = screenToWorld(location)
+        let world = effectiveTransform.invert(location)
         dragDelta = CGSize(
             width: world.x - dragAnchorWorld.x,
             height: world.y - dragAnchorWorld.y
@@ -1168,14 +1154,6 @@ struct SkyView: View {
             }
             await MainActor.run { onMutation() }
         }
-    }
-
-    // screen = world * scale + offset  ⇒  world = (screen - offset) / scale
-    private func screenToWorld(_ p: CGPoint) -> CGPoint {
-        CGPoint(
-            x: (p.x - offset.width)  / scale,
-            y: (p.y - offset.height) / scale
-        )
     }
 
     // MARK: - Label density
@@ -1327,26 +1305,6 @@ private struct SplitMix64 {
     }
 }
 
-// Tiny value type so the transform math is one place and easy to test.
-struct CanvasTransform {
-    let scale: CGFloat
-    let offsetX: CGFloat
-    let offsetY: CGFloat
-
-    func apply(_ x: Double, _ y: Double) -> CGPoint {
-        CGPoint(x: x * scale + offsetX, y: y * scale + offsetY)
-    }
-}
-
-private extension CGFloat {
-    // Renamed from `clamped` to avoid a name collision with the
-    // package-scoped `clamped(to: ClosedRange<Double>)` Apple added
-    // somewhere in the iOS 18 SDK — that one wins overload resolution
-    // because the SDK considers `CGFloat == Double`, but its
-    // `package` visibility means it's not callable from outside its
-    // owning module and the build fails. Using a uniquely-named
-    // helper sidesteps the whole question.
-    func zoomClamped(to range: ClosedRange<CGFloat>) -> CGFloat {
-        Swift.min(range.upperBound, Swift.max(range.lowerBound, self))
-    }
-}
+// CanvasTransform / CameraPose / CanvasCamera live in CanvasCamera.swift
+// (pure, SwiftUI-free, unit-testable). SkyView owns the live @State and
+// the gesture/animation wiring below and delegates the math to them.
