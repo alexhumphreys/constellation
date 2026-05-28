@@ -53,8 +53,14 @@ demo:
 ios-sim := "iPhone 17"
 ios-pad-sim := "iPad Pro 13-inch (M4)"
 
+# GIT_SHA is expanded into the app's `GitSHA` Info.plist key (project.yml)
+# so the `app.launch` wide event can report which build it ran. The SHA
+# reflects the checkout at generate time — re-run `just ios-gen` to refresh
+# it. Falls back to "unknown" on a detached HEAD or a non-repo checkout.
 ios-gen:
-    cd Apps/Constellation-iOS && xcodegen generate
+    cd Apps/Constellation-iOS && \
+      GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)" \
+      xcodegen generate
 
 ios-build:
     xcodebuild \

@@ -32,6 +32,13 @@ targets:
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
         CFBundleDisplayName: Constellation
+        # Short git SHA of the checkout, expanded from the GIT_SHA env var
+        # at `xcodegen generate` time (see the `ios-gen` justfile recipe).
+        # Read at runtime by LaunchMetrics for the `app.launch` wide event
+        # so launch timings can be correlated to a build. Empty when
+        # generated without GIT_SHA set → LaunchMetrics falls back to
+        # "unknown". Refresh by re-running `just ios-gen`.
+        GitSHA: ${GIT_SHA}
         # Expose the app's Documents dir over Finder / Files so the
         # SQLite store can be airdropped or backed up to Dropbox without
         # a custom share extension.
