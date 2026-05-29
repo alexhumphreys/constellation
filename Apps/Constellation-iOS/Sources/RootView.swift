@@ -469,6 +469,12 @@ struct RootView: View {
                 pendingAttachmentId = attachmentId
             }
         )
+        // Full-bleed: the star field draws edge-to-edge (under the notch
+        // and home indicator) so the sky doesn't stop at the safe-area
+        // rectangle. The chrome (hobby filter, +/select buttons, iPad
+        // inspector) lives in sibling views that still respect the safe
+        // area, so only the canvas extends.
+        .ignoresSafeArea()
     }
 
     // Floating "+" button rendered below HobbyFilterView at top-leading.
