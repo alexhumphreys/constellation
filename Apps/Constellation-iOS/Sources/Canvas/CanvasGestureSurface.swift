@@ -66,6 +66,9 @@ struct CanvasGestureSurface: UIViewRepresentable {
         // control without fighting the decaying camera.
         view.onTouchDown = { [weak coordinator = context.coordinator] in
             coordinator?.cancelMomentum()
+            // Warm the Taptic engine now so the catch beat fires with
+            // no latency if this touch promotes to a long-press grab.
+            coordinator?.prepareDragCatchHaptic()
         }
 
         let pan = UIPanGestureRecognizer(
@@ -156,6 +159,15 @@ struct CanvasGestureSurface: UIViewRepresentable {
         // rather than flipping to a pan mid-stroke.
         private var lassoActive: Bool = false
         private var lassoPoints: [CGPoint] = []
+        // Fired the instant a long-press catches a star (single or
+        // group), so the grab has a tactile "it's now yours" beat.
+        // iPhone-only (iPad no-ops); flip the flag to disable.
+        private static let dragCatchHapticEnabled = true
+        private let dragCatchHaptic = UIImpactFeedbackGenerator(style: .rigid)
+
+        func prepareDragCatchHaptic() {
+            if Self.dragCatchHapticEnabled { dragCatchHaptic.prepare() }
+        }
         private let autoPan = DisplayLinkDriver()
         // Most recent finger location in view coords, refreshed each
         // long-press tick and read by the display-link callback so
@@ -407,6 +419,9 @@ struct CanvasGestureSurface: UIViewRepresentable {
                 // can long-press background → still pan/zoom normally.
                 if parent.onDragBegan(loc) {
                     draggingActive = true
+                    if Self.dragCatchHapticEnabled {
+                        dragCatchHaptic.impactOccurred()
+                    }
                     lastDragLocation = loc
                     dragSamples = [(loc, CACurrentMediaTime())]
                     hostView = g.view
