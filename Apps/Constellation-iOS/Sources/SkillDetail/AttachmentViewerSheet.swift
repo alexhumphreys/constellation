@@ -1,5 +1,7 @@
 import ConstellationCore
+import ImageIO
 import SwiftUI
+import UIKit
 
 // Full-screen viewer for one attachment. Photos render via SwiftUI's
 // Image (loaded from disk, not the thumbnail), videos via
@@ -23,6 +25,10 @@ struct AttachmentViewerSheet: View {
     let onCreated: () -> Void
 
     @State private var loadedURL: URL?
+    // Photo only: the decoded-at-screen-resolution bitmap. Downsampled
+    // off-main in loadAsset so opening a photo never realizes the full
+    // ~6000px import into a 100MB+ bitmap on the main thread.
+    @State private var photoImage: UIImage?
     @State private var loadError: String?
     @State private var showDeleteConfirm: Bool = false
     @State private var deleting: Bool = false
@@ -88,7 +94,7 @@ struct AttachmentViewerSheet: View {
         } else if let loadedURL {
             switch attachment.mediaType {
             case .photo:
-                photoView(url: loadedURL)
+                photoView
             case .video:
                 VideoPlayerView(url: loadedURL) { frame in
                     try await saveFrame(
@@ -101,20 +107,49 @@ struct AttachmentViewerSheet: View {
         }
     }
 
-    private func photoView(url: URL) -> some View {
-        // Use UIImage rather than AsyncImage because the file is local and
-        // AsyncImage spins up a URLSession unnecessarily. UIImage(contentsOfFile:)
-        // is synchronous but cheap for our re-encoded JPEGs (<1MB typical).
-        Group {
-            if let ui = UIImage(contentsOfFile: url.path) {
-                Image(uiImage: ui)
-                    .resizable()
-                    .scaledToFit()
-            } else {
-                Text("Image data unavailable")
-                    .foregroundStyle(.white.opacity(0.5))
-            }
+    @ViewBuilder
+    private var photoView: some View {
+        if let photoImage {
+            Image(uiImage: photoImage)
+                .resizable()
+                .scaledToFit()
+        } else {
+            ProgressView().tint(.white)
         }
+    }
+
+    // Largest screen dimension in physical pixels — the downsample target
+    // for the fullscreen photo. This viewer has no zoom gesture, so
+    // decoding past screen resolution only wastes memory.
+    @MainActor
+    private static func screenMaxPixelSize() -> Int {
+        let bounds = UIScreen.main.bounds.size
+        let longEdge = max(bounds.width, bounds.height)
+        return Int(longEdge * UIScreen.main.scale)
+    }
+
+    // Disk → downsampled UIImage via ImageIO, decoding straight to the
+    // target pixel size instead of realizing the full-res bitmap. Reads
+    // from the file URL so the full JPEG never lands in memory either.
+    nonisolated private static func downsampledImage(
+        atPath path: String, maxPixelSize: Int
+    ) -> UIImage? {
+        let url = URL(fileURLWithPath: path)
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+            return nil
+        }
+        let opts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+        ]
+        guard let cg = CGImageSourceCreateThumbnailAtIndex(
+            src, 0, opts as CFDictionary
+        ) else {
+            return nil
+        }
+        return UIImage(cgImage: cg)
     }
 
     private func loadAsset() async {
@@ -126,6 +161,22 @@ struct AttachmentViewerSheet: View {
                 return
             }
             await MainActor.run { self.loadedURL = url }
+            // Videos hand the URL straight to VideoPlayerView. Photos get
+            // downsampled to screen resolution off the main thread before
+            // we show them, so the decode never spikes memory or hitches.
+            guard attachment.mediaType == .photo else { return }
+            let maxPx = await MainActor.run { Self.screenMaxPixelSize() }
+            let path = url.path
+            let image = await Task.detached(priority: .userInitiated) {
+                Self.downsampledImage(atPath: path, maxPixelSize: maxPx)
+            }.value
+            await MainActor.run {
+                if let image {
+                    self.photoImage = image
+                } else {
+                    self.loadError = "Couldn't decode the image."
+                }
+            }
         } catch {
             await MainActor.run {
                 self.loadError = String(describing: error)
