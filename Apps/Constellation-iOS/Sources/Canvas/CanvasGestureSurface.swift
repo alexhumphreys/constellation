@@ -46,6 +46,15 @@ struct CanvasGestureSurface: UIViewRepresentable {
     // (pan or pinch). Used by the host to dismiss transient overlays
     // — chain trace, etc. — without needing to watch offset/scale.
     var onCanvasGestureBegan: () -> Void = {}
+    // Select-mode lasso. While true, a one-finger drag traces a
+    // freeform selection path (reported in view coords) instead of
+    // panning the canvas; two-finger pan + pinch still navigate, and a
+    // long-press star-grab still wins (it suppresses pan before we get
+    // here). onLassoChanged fires per tick with the path so far;
+    // onLassoEnded fires once on lift with the final path.
+    var isSelectMode: Bool = false
+    var onLassoChanged: ([CGPoint]) -> Void = { _ in }
+    var onLassoEnded: ([CGPoint]) -> Void = { _ in }
 
     func makeUIView(context: Context) -> UIView {
         let view = TouchView()
@@ -141,6 +150,12 @@ struct CanvasGestureSurface: UIViewRepresentable {
         weak var longPress: UILongPressGestureRecognizer?
         weak var tap: UITapGestureRecognizer?
         private var draggingActive: Bool = false
+        // Select-mode lasso state. `lassoActive` latches at .began for a
+        // one-finger drag (sticky for the rest of the gesture even if a
+        // second finger lands) so the freeform path keeps tracking
+        // rather than flipping to a pan mid-stroke.
+        private var lassoActive: Bool = false
+        private var lassoPoints: [CGPoint] = []
         private let autoPan = DisplayLinkDriver()
         // Most recent finger location in view coords, refreshed each
         // long-press tick and read by the display-link callback so
@@ -225,6 +240,12 @@ struct CanvasGestureSurface: UIViewRepresentable {
                 g.setTranslation(.zero, in: g.view)
                 return
             }
+            // Select-mode lasso intercepts a one-finger drag before any
+            // canvas panning. Decided at .began by touch count, so a
+            // two-finger gesture still falls through to pan/zoom.
+            if parent.isSelectMode, handleLasso(g) {
+                return
+            }
             switch g.state {
             case .began:
                 lastPanTouchCount = g.numberOfTouches
@@ -267,6 +288,36 @@ struct CanvasGestureSurface: UIViewRepresentable {
                 }
             default:
                 break
+            }
+        }
+
+        // Freeform lasso path for a one-finger select-mode drag. Returns
+        // true while it owns the gesture so handlePan bails out of any
+        // canvas panning. Latches at .began on a single touch; once
+        // active it stays active for the rest of the gesture (a late
+        // second finger won't convert it to a pan).
+        private func handleLasso(_ g: UIPanGestureRecognizer) -> Bool {
+            switch g.state {
+            case .began:
+                guard g.numberOfTouches == 1 else { return false }
+                lassoActive = true
+                lassoPoints = [g.location(in: g.view)]
+                parent.onLassoChanged(lassoPoints)
+                return true
+            case .changed:
+                guard lassoActive else { return false }
+                lassoPoints.append(g.location(in: g.view))
+                parent.onLassoChanged(lassoPoints)
+                return true
+            case .ended, .cancelled, .failed:
+                guard lassoActive else { return false }
+                lassoActive = false
+                let pts = lassoPoints
+                lassoPoints = []
+                parent.onLassoEnded(pts)
+                return true
+            default:
+                return false
             }
         }
 

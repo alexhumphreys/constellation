@@ -1,5 +1,6 @@
 import ConstellationCore
 import SwiftUI
+import UIKit
 
 // The constellation canvas. Uses SwiftUI Canvas (declarative drawing
 // API) rather than a ZStack of Circle views because we want to render
@@ -183,6 +184,33 @@ struct SkyView: View {
     // an interrupting gesture can commit the star where it currently is.
     @State private var flickAnimator = CanvasValueAnimator()
     @State private var flickActive = false
+
+    // Freeform lasso path (screen coords), populated while a one-finger
+    // drag is in progress in select mode. Drawn on top of the canvas;
+    // on release the enclosed stars are unioned into multiSelectedIds.
+    @State private var lassoPoints: [CGPoint] = []
+
+    // Cluster spread (expand / tighten the selection around its
+    // centroid). Driven by holding one of the floating centroid
+    // handles: a timer ramps a uniform scale of the selected stars
+    // about `spreadCentroid` (captured in world space at press, fixed
+    // for the hold since a uniform scale leaves the centroid put);
+    // release commits via the same batched upsert path as drag/flick.
+    private enum SpreadDirection { case expand, tighten }
+    @State private var activeSpread: SpreadDirection? = nil
+    @State private var spreadTimer: Timer? = nil
+    @State private var spreadCentroid: CGPoint = .zero
+    @State private var spreadHaptics = UIImpactFeedbackGenerator(style: .soft)
+    @State private var lastSpreadHaptic: CFTimeInterval = 0
+    // Felt-tuned: fraction the cluster radius grows/shrinks per second
+    // while a handle is held. Tighten won't collapse below spreadMinRadius
+    // so the stars can't all crush onto the centroid.
+    private static let spreadRatePerSec: CGFloat = 0.6
+    private static let spreadMinRadius: CGFloat = 15
+    // Haptics ratchet while spreading. Single flag to disable; iPhone-
+    // only (iPad has no Taptic Engine → no-op) and silent in the sim.
+    private static let spreadHapticsEnabled = true
+    private static let spreadHapticInterval: CFTimeInterval = 0.07
 
     // Passed to SkyBloom for petal sizing — iPad's regular width earns a
     // bigger bloom at peak zoom (see SkyBloom.peakPetalSize).
@@ -537,6 +565,24 @@ struct SkyView: View {
                     )
                     context.draw(resolved, at: origin, anchor: .leading)
                 }
+
+                // Lasso overlay (select mode): the freeform selection
+                // path in screen space, drawn on top of everything. Gold
+                // to match the multi-select ring — faint fill so the
+                // enclosed region reads as "about to be selected",
+                // brighter stroke for the edge being traced.
+                if lassoPoints.count > 1 {
+                    var path = Path()
+                    path.move(to: lassoPoints[0])
+                    for pt in lassoPoints.dropFirst() { path.addLine(to: pt) }
+                    path.closeSubpath()
+                    context.fill(path, with: .color(Theme.Sky.chain.opacity(0.10)))
+                    context.stroke(
+                        path,
+                        with: .color(Theme.Sky.chain.opacity(0.9)),
+                        style: StrokeStyle(lineWidth: 1.5, lineJoin: .round)
+                    )
+                }
             }
             }  // closes TimelineView wrapping the main Canvas
             .overlay {
@@ -669,11 +715,21 @@ struct SkyView: View {
                         focusAnimator.cancel()
                         cancelFlick()
                         onCanvasGesture()
-                    }
+                    },
+                    isSelectMode: isSelectMode,
+                    onLassoChanged: { lassoPoints = $0 },
+                    onLassoEnded: { finishLasso($0) }
                 )
             )
             .overlay(alignment: .bottomTrailing) {
                 resetButton(into: geo.size)
+            }
+            // Floating expand/tighten handles at the selection centroid.
+            // Layered above the gesture surface (like the reset button)
+            // so the holds hit-test before the canvas pan/lasso; the
+            // empty regions of the overlay stay touch-transparent.
+            .overlay {
+                spreadControls()
             }
             .onAppear { fitIfNeeded(into: geo.size) }
             .onChange(of: geo.size) { _, newSize in
@@ -976,6 +1032,204 @@ struct SkyView: View {
             }
         }
         return best
+    }
+
+    // MARK: - Lasso select
+
+    // On lasso release: union every visible star whose screen position
+    // falls inside the traced polygon into the selection. Additive
+    // (tap still toggles individuals), and a no-op for a degenerate
+    // path or outside select mode. Always clears the path so the
+    // overlay disappears on lift.
+    private func finishLasso(_ points: [CGPoint]) {
+        defer { lassoPoints = [] }
+        guard isSelectMode, points.count >= 3 else { return }
+        let transform = effectiveTransform
+        var selected = multiSelectedIds
+        for skill in skills {
+            let w = worldPosition(of: skill)
+            let p = transform.apply(w.x, w.y)
+            if Self.pointInPolygon(p, points) {
+                selected.insert(skill.id)
+            }
+        }
+        multiSelectedIds = selected
+    }
+
+    // Even-odd ray cast: count how many polygon edges a rightward ray
+    // from `p` crosses; odd = inside. Closes the polygon implicitly
+    // (edge from last vertex back to first via the j/i wrap).
+    private static func pointInPolygon(_ p: CGPoint, _ poly: [CGPoint]) -> Bool {
+        guard poly.count >= 3 else { return false }
+        var inside = false
+        var j = poly.count - 1
+        for i in 0..<poly.count {
+            let a = poly[i], b = poly[j]
+            if (a.y > p.y) != (b.y > p.y) {
+                let x = a.x + (p.y - a.y) / (b.y - a.y) * (b.x - a.x)
+                if p.x < x { inside.toggle() }
+            }
+            j = i
+        }
+        return inside
+    }
+
+    // MARK: - Cluster spread (expand / tighten the selection)
+
+    // Centroid of the selected stars in world space — the fixed pivot
+    // for the spread scale. nil unless 3+ are selected (with 2, moving
+    // one star apart is simpler than a radial scale, so the handles
+    // don't appear).
+    private func selectionCentroidWorld() -> CGPoint? {
+        let pts = skills
+            .filter { multiSelectedIds.contains($0.id) }
+            .map { worldPosition(of: $0) }
+        guard pts.count >= 3 else { return nil }
+        let sx = pts.reduce(CGFloat(0)) { $0 + $1.x }
+        let sy = pts.reduce(CGFloat(0)) { $0 + $1.y }
+        return CGPoint(x: sx / CGFloat(pts.count), y: sy / CGFloat(pts.count))
+    }
+
+    @ViewBuilder
+    private func spreadControls() -> some View {
+        if isSelectMode, lassoPoints.isEmpty, dragBaselines.isEmpty,
+           let centroid = selectionCentroidWorld() {
+            let p = effectiveTransform.apply(centroid.x, centroid.y)
+            HStack(spacing: 4) {
+                spreadHandle(.tighten)
+                spreadHandle(.expand)
+            }
+            .position(x: p.x, y: p.y)
+        }
+    }
+
+    private func spreadHandle(_ dir: SpreadDirection) -> some View {
+        // Small, semi-transparent badge so it doesn't loom over the
+        // stars, wrapped in a 44pt touch target so it's still easy to
+        // press. The visible circle is 28pt; the outer frame +
+        // contentShape carry the hit area.
+        Image(systemName: dir == .expand
+            ? "arrow.up.left.and.arrow.down.right"
+            : "arrow.down.right.and.arrow.up.left")
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(.white.opacity(0.8))
+            .frame(width: 28, height: 28)
+            .background(
+                Circle()
+                    .fill(Theme.Sky.chain.opacity(0.16))
+                    .background(Circle().fill(.ultraThinMaterial.opacity(0.6)))
+                    .overlay(Circle().stroke(Theme.Sky.chain.opacity(0.5), lineWidth: 0.8))
+            )
+            .frame(width: 44, height: 44)
+            .contentShape(Circle())
+            // minimumDistance 0 makes this a press-and-hold: the first
+            // change fires on touch-down (starts the ramp timer), end
+            // fires on lift (commits). The timer — not this gesture —
+            // drives the scaling, since a stationary finger emits no
+            // further change events.
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in if activeSpread != dir { beginSpread(dir) } }
+                    .onEnded { _ in endSpread() }
+            )
+            .accessibilityLabel(dir == .expand ? "Spread selection" : "Tighten selection")
+    }
+
+    private func beginSpread(_ dir: SpreadDirection) {
+        guard let centroid = selectionCentroidWorld() else { return }
+        activeSpread = dir
+        spreadCentroid = centroid
+        // Seed overrides from the stars' current positions so the scale
+        // grows from where they actually are, and holds through the
+        // post-commit reload (cleared by .onChange(of: skills)).
+        var seed = positionOverrides
+        for s in skills where multiSelectedIds.contains(s.id) {
+            seed[s.id] = worldPosition(of: s)
+        }
+        positionOverrides = seed
+        if Self.spreadHapticsEnabled {
+            spreadHaptics.prepare()
+            lastSpreadHaptic = 0
+        }
+        spreadTimer?.invalidate()
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { _ in
+            spreadTick()
+        }
+        // .common so it keeps firing while the finger is held down
+        // (default mode pauses during UIKit touch tracking).
+        RunLoop.main.add(timer, forMode: .common)
+        spreadTimer = timer
+    }
+
+    private func spreadTick() {
+        guard let dir = activeSpread else { return }
+        let dt: CGFloat = 1.0 / 60.0
+        let factor = dir == .expand
+            ? 1 + Self.spreadRatePerSec * dt
+            : 1 - Self.spreadRatePerSec * dt
+        let c = spreadCentroid
+        var next = positionOverrides
+        // Tighten stops once the cluster has pulled in to the floor so
+        // the stars don't all crush onto a single point.
+        if dir == .tighten {
+            let maxR = skills
+                .filter { multiSelectedIds.contains($0.id) }
+                .map { s -> CGFloat in
+                    let w = next[s.id] ?? worldPosition(of: s)
+                    let dx = w.x - c.x, dy = w.y - c.y
+                    return (dx * dx + dy * dy).squareRoot()
+                }
+                .max() ?? 0
+            if maxR < Self.spreadMinRadius { return }
+        }
+        for s in skills where multiSelectedIds.contains(s.id) {
+            let w = next[s.id] ?? worldPosition(of: s)
+            next[s.id] = CGPoint(
+                x: c.x + (w.x - c.x) * factor,
+                y: c.y + (w.y - c.y) * factor
+            )
+        }
+        positionOverrides = next
+        spreadHapticTick()
+    }
+
+    private func endSpread() {
+        spreadTimer?.invalidate()
+        spreadTimer = nil
+        guard activeSpread != nil else { return }
+        activeSpread = nil
+        commitSpread()
+    }
+
+    // Persist the spread the same way settleDrag does — one upsert (and
+    // one skill.upsert wide event) per moved star, serial so an inbound
+    // MC merge mid-flight can't see a half-applied group. Overrides stay
+    // until the reload lands.
+    private func commitSpread() {
+        let bySkillId = Dictionary(uniqueKeysWithValues: skills.map { ($0.id, $0) })
+        let now = Date()
+        var updates: [Skill] = []
+        for id in multiSelectedIds {
+            guard var s = bySkillId[id], let pos = positionOverrides[id] else { continue }
+            s.x = Double(pos.x)
+            s.y = Double(pos.y)
+            s.updatedAt = now
+            updates.append(s)
+        }
+        guard !updates.isEmpty else { return }
+        Task {
+            for s in updates { try? await store.upsertSkill(s) }
+            await MainActor.run { onMutation() }
+        }
+    }
+
+    private func spreadHapticTick() {
+        guard Self.spreadHapticsEnabled else { return }
+        let now = CACurrentMediaTime()
+        guard now - lastSpreadHaptic >= Self.spreadHapticInterval else { return }
+        spreadHaptics.impactOccurred(intensity: 0.6)
+        spreadHaptics.prepare()
+        lastSpreadHaptic = now
     }
 
     // MARK: - Drag-to-move
