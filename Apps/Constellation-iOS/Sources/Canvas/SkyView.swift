@@ -1048,30 +1048,11 @@ struct SkyView: View {
         var selected = multiSelectedIds
         for skill in skills {
             let w = worldPosition(of: skill)
-            let p = transform.apply(w.x, w.y)
-            if Self.pointInPolygon(p, points) {
+            if SelectionGeometry.contains(points, transform.apply(w.x, w.y)) {
                 selected.insert(skill.id)
             }
         }
         multiSelectedIds = selected
-    }
-
-    // Even-odd ray cast: count how many polygon edges a rightward ray
-    // from `p` crosses; odd = inside. Closes the polygon implicitly
-    // (edge from last vertex back to first via the j/i wrap).
-    private static func pointInPolygon(_ p: CGPoint, _ poly: [CGPoint]) -> Bool {
-        guard poly.count >= 3 else { return false }
-        var inside = false
-        var j = poly.count - 1
-        for i in 0..<poly.count {
-            let a = poly[i], b = poly[j]
-            if (a.y > p.y) != (b.y > p.y) {
-                let x = a.x + (p.y - a.y) / (b.y - a.y) * (b.x - a.x)
-                if p.x < x { inside.toggle() }
-            }
-            j = i
-        }
-        return inside
     }
 
     // MARK: - Cluster spread (expand / tighten the selection)
@@ -1084,10 +1065,11 @@ struct SkyView: View {
         let pts = skills
             .filter { multiSelectedIds.contains($0.id) }
             .map { worldPosition(of: $0) }
+        // 3+ is a product gate (with 2, moving one apart is simpler than
+        // a radial scale), not geometry — so it stays here, not in
+        // SelectionGeometry.centroid.
         guard pts.count >= 3 else { return nil }
-        let sx = pts.reduce(CGFloat(0)) { $0 + $1.x }
-        let sy = pts.reduce(CGFloat(0)) { $0 + $1.y }
-        return CGPoint(x: sx / CGFloat(pts.count), y: sy / CGFloat(pts.count))
+        return SelectionGeometry.centroid(of: pts)
     }
 
     @ViewBuilder
@@ -1172,22 +1154,16 @@ struct SkyView: View {
         // Tighten stops once the cluster has pulled in to the floor so
         // the stars don't all crush onto a single point.
         if dir == .tighten {
-            let maxR = skills
+            let pts = skills
                 .filter { multiSelectedIds.contains($0.id) }
-                .map { s -> CGFloat in
-                    let w = next[s.id] ?? worldPosition(of: s)
-                    let dx = w.x - c.x, dy = w.y - c.y
-                    return (dx * dx + dy * dy).squareRoot()
-                }
-                .max() ?? 0
-            if maxR < Self.spreadMinRadius { return }
+                .map { next[$0.id] ?? worldPosition(of: $0) }
+            if SelectionGeometry.maxRadius(of: pts, about: c) < Self.spreadMinRadius {
+                return
+            }
         }
         for s in skills where multiSelectedIds.contains(s.id) {
             let w = next[s.id] ?? worldPosition(of: s)
-            next[s.id] = CGPoint(
-                x: c.x + (w.x - c.x) * factor,
-                y: c.y + (w.y - c.y) * factor
-            )
+            next[s.id] = SelectionGeometry.scaled(w, about: c, by: factor)
         }
         positionOverrides = next
         spreadHapticTick()
